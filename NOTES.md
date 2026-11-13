@@ -2,6 +2,19 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-13 ~11:10 UTC: iOS 16 USERLAND + APPLE LOGO ON A SAMSUNG GALAXY S25 ULTRA (Sweet16) <<<
+User's S25 Ultra (Snapdragon 8 Elite, One UI, KernelSU present but unused), Sweet16 = local fix139 APK (unmodified
+Termux QEMU, CI #6 kernel), 4 cores, 4 GB. rootfs.img built ON THE PHONE by tools/termux/mkiosroot-termux.sh from
+iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw: Ubuntu VM run took ~4 h 12 min (15136 s), "== done".
+Imported via SAF -> "iOS 16 is ready". OBSERVED (user screenshots of the guest framebuffer):
+- kernel: `SWEET CPU: 4/4 CPUs initialized, SGI1 verified`, BSD init, MAC framework
+- launchd + daemons: exec nfcd, driverkitd, sharingd, lockdownd, keybagd, configd, backboardd, mediaserverd,
+  logd, UserEventAgent, ... ; `SWEET AKS: chronod/sharingd/coreduetd/SpringBoard sel ...` -> AppleKeyStore stub works
+- **Apple logo drawn** (backboardd/CoreAnimation through ramfb, 560x1218 downscaled framebuffer)
+- **SpringBoard started**; datamigrator and profiled running
+- **virtio tablet touch reaches SweetHID**: `SWEET HID: touch 0 down at 914,2009 ... up at 948,1643`
+NEXT: wait for the lock screen (datamigrator can take long on first boot); then input/latency, then networking.
+
 ### >>> 2026-11-13 03:40 UTC: phone exit 139 root-caused + fixed; SMP verified <<<
 - User's Samsung (CI APK #6, new Launch log): pre-flight `libqemu.so --version` exit 139 (SIGSEGV), nothing printed.
 - ROOT CAUSE (reproduced here): fetch-termux-qemu.py ran patchelf (--set-soname/--replace-needed/--remove-rpath) and

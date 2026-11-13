@@ -43,7 +43,7 @@ qpath() { printf '%s' "${1//,/,,}"; }
 
 [[ -f $ipsw ]] || { echo "no such IPSW: $ipsw" >&2; exit 1; }
 [[ ! -e $out ]] || { echo "refusing to overwrite $out (delete it first)" >&2; exit 1; }
-for t in qemu-system-aarch64 qemu-img mformat mcopy mtype curl truncate; do
+for t in qemu-system-aarch64 qemu-img mformat mcopy mtype curl; do
 	command -v "$t" >/dev/null || {
 		echo "missing $t: pkg install qemu-system-aarch64-headless qemu-utils mtools dosfstools curl" >&2
 		exit 1
@@ -70,7 +70,9 @@ fi
 say "preparing the job disk"
 seed=$vm/job.img
 rm -f "$seed"
-truncate -s 64M "$seed"
+# Empty (sparse) files via qemu-img: Termux's truncate rejected "-s SIZE" on a
+# Samsung phone ("Invalid number: <current directory>").
+qemu-img create -q -f raw "$seed" 64M
 mformat -i "$seed" -v CIDATA -F ::
 cat > "$vm/user-data" <<'EOF'
 #cloud-config
@@ -89,7 +91,7 @@ mcopy -i "$seed" "$here/guest-job.sh" "$here/ipsw-extract.py" \
 	"$repo/tools/mkiosroot.sh" "$repo/tools/sweet-root-tweaks.py" "$repo/tools/adt.py" ::
 [[ -n ${SWEET16_EXTRA_CA:-} ]] && mcopy -i "$seed" "$SWEET16_EXTRA_CA" ::extra-ca.crt
 
-truncate -s "$size" "$out"
+qemu-img create -q -f raw "$out" "$size"
 say "starting the VM ($cpus CPUs, $mem MB). The Ubuntu boot alone takes a few minutes in emulation."
 say "progress lines start with SWEET16:   (stop: Ctrl-A then X)"
 rc=0

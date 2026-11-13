@@ -30,6 +30,7 @@ class Store(private val context: Context) {
     val qemuLog = File(files, "qemu.log")
     val qemuDebugLog = File(files, "qemu-debug.log")
     val lastLaunch = File(files, "last-launch.txt")
+    val launchLog = File(files, "launch.log")
     val bootDir = File(context.cacheDir, "boot")
     val selftestRamdisk = File(files, "sweet-sh")
     val vncSocket = File(context.cacheDir, "vnc.sock")
@@ -128,6 +129,38 @@ class Store(private val context: Context) {
     }
 
     fun nativeLibDir(): String = context.applicationInfo.nativeLibraryDir
+
+    /** Symlinks with QEMU's original library names (sonames) -> the unmodified files in nativeLibraryDir. */
+    val qemuLibLinks = File(files, "qemu-libs")
+
+    /**
+     * The APK ships Termux's ELF files unmodified, some under package-safe
+     * names (assets/qemu/libmap.txt: "<soname> <apk name>", from
+     * android/tools/fetch-termux-qemu.py). Recreate the sonames as symlinks;
+     * returns how many. The linker maps the real files from nativeLibraryDir.
+     */
+    fun prepareQemuLibLinks(): Int {
+        val map = try {
+            context.assets.open("qemu/libmap.txt").bufferedReader().readLines()
+        } catch (e: Exception) {
+            emptyList()
+        }
+        qemuLibLinks.deleteRecursively()
+        qemuLibLinks.mkdirs()
+        var n = 0
+        for (line in map) {
+            val parts = line.trim().split(' ')
+            if (parts.size != 2) continue
+            val (soname, apkName) = parts
+            if (soname == apkName || soname.contains('/')) continue
+            android.system.Os.symlink(File(nativeLibDir(), apkName).path, File(qemuLibLinks, soname).path)
+            n++
+        }
+        return n
+    }
+
+    /** LD_LIBRARY_PATH for QEMU: the soname links first, then the native library dir. */
+    fun qemuLibraryPath(): String = qemuLibLinks.path + ":" + nativeLibDir()
 
     fun qemuBinary(): File = File(nativeLibDir(), "libqemu.so")
 

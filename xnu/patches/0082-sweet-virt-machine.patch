@@ -810,7 +810,7 @@ index 0000000..60627ab
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
-index 2545cf9..0f8d7d0 100644
+index 2545cf9..e994dc0 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
 @@ -17,6 +17,7 @@
@@ -866,6 +866,23 @@ index 2545cf9..0f8d7d0 100644
  	return (int32_t)x0;
  }
  
+@@ -73,9 +99,13 @@ SweetCPU::start(IOService *provider)
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
+-	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+-	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
++	/*
++	 * Phone: MPIDR Aff1 = core (0x000-0x500 A55, 0x600/0x700 A76).
++	 * sweet-virt (QEMU virt, PSCI over hvc): MPIDR Aff0 = core, 0-15.
++	 */
++	bool mpidr_ok = sweet_psci_use_hvc() ? cpu->phys_id < 16 :
++	    (cpu->phys_id <= 0x700 && (cpu->phys_id & 0xff) == 0);
++	if (!mpidr_ok || topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+ 	}
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 index a62416c..5c54bba 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp

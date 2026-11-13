@@ -1,0 +1,23 @@
+name: runner-probe
+
+# Which macOS runner labels this repository gets, and their Xcode versions
+# (xnu-8796 needs an Xcode 15 iig; see xnu.yml).
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths: [".github/workflows/runner-probe.yml"]
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-latest, macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - run: |
+          uname -a
+          sw_vers 2>/dev/null || true
+          ls -d /Applications/Xcode*.app 2>/dev/null || true

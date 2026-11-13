@@ -14,7 +14,8 @@
  *
  * Position independent, no relocations, no writable data: every reference
  * is adr, buffers are on the stack. Raw syscalls: x16, svc #0x80, carry on
- * error.
+ * error. The sysctlbyname trap takes (name, namelen, old, oldlenp, new,
+ * newlen); libc's wrapper adds namelen, so it is passed explicitly here.
  *
  * Stack frame (x29 = base): +0 line[256], +256 out[512], +768 len (u64),
  * +776 int value.
@@ -131,12 +132,13 @@ cmd_hw:
 	adr	x1, s_lbl_ncpu
 	bl	puts_z
 	adr	x0, s_hw_ncpu
-	add	x1, x29, #776
+	bl	strlen_x0
+	add	x2, x29, #776
 	mov	x9, #4
 	str	x9, [x29, #768]
-	add	x2, x29, #768
-	mov	x3, #0
+	add	x3, x29, #768
 	mov	x4, #0
+	mov	x5, #0
 	mov	x16, #SYS_sysctlbyname
 	svc	#0x80
 	b.cs	1f
@@ -150,12 +152,13 @@ cmd_hw:
 /* Print the string sysctl named by x0, then a newline. */
 sysctl_str:
 	stp	x30, xzr, [sp, #-16]!
-	add	x1, x29, #256		/* out */
+	bl	strlen_x0		/* x1 = namelen */
+	add	x2, x29, #256		/* out */
 	mov	x9, #511
 	str	x9, [x29, #768]
-	add	x2, x29, #768
-	mov	x3, #0
+	add	x3, x29, #768
 	mov	x4, #0
+	mov	x5, #0
 	mov	x16, #SYS_sysctlbyname
 	svc	#0x80
 	b.cs	2f
@@ -171,6 +174,15 @@ sysctl_str:
 	bl	puts_z
 3:	ldp	x30, xzr, [sp], #16
 	ret
+
+/* x1 = strlen(x0); x0 unchanged */
+strlen_x0:
+	mov	x1, #0
+1:	ldrb	w9, [x0, x1]
+	cbz	w9, 2f
+	add	x1, x1, #1
+	b	1b
+2:	ret
 
 /* x0 = 0 if the line equals the NUL-terminated string at x1 */
 streq_line:

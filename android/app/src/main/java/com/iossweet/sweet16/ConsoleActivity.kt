@@ -42,7 +42,8 @@ class ConsoleActivity : Activity() {
     @Volatile private var open = false
     private var view = View.CONSOLE
 
-    private enum class View { CONSOLE, QEMU }
+    private enum class View { CONSOLE, LAUNCH, QEMU }
+    private lateinit var state: TextView
 
     private val tick = object : Runnable {
         override fun run() {
@@ -82,6 +83,7 @@ class ConsoleActivity : Activity() {
         }
         val bar = LinearLayout(this).apply {
             addView(btn("Console") { view = View.CONSOLE; refresh() })
+            addView(btn("Launch log") { view = View.LAUNCH; refresh() })
             addView(btn("QEMU log") { view = View.QEMU; refresh() })
             addView(btn("CPU regs") { cpuRegisters() })
             addView(btn("Boot details") { bootDetails() })
@@ -95,6 +97,10 @@ class ConsoleActivity : Activity() {
             setBackgroundColor(Color.BLACK)
             setPadding(0, (24 * d).toInt(), 0, 0)
             addView(HorizontalScrollView(this@ConsoleActivity).apply { addView(bar) })
+            state = TextView(this@ConsoleActivity).apply {
+                textSize = 12f; setTextColor(Color.rgb(255, 214, 120)); setPadding((10 * d).toInt(), 0, (10 * d).toInt(), (4 * d).toInt())
+            }
+            addView(state)
             addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(inputRow)
         })
@@ -157,7 +163,9 @@ class ConsoleActivity : Activity() {
     private fun refresh() {
         io.execute { if (serial == null) connectSerial() }
         val atEnd = !scroll.canScrollVertically(1)
+        state.text = "VM: ${VmState.phase.name.lowercase()}" + (if (VmState.message.isNotEmpty()) " — " + VmState.message.take(300) else "")
         text.text = when (view) {
+            View.LAUNCH -> "── launch log (${store.launchLog.name}) ──\n" + tail(store.launchLog, 64 * 1024)
             View.CONSOLE -> "── kernel console (PL011, ${store.consoleLog.name}) ──\n" + tail(store.consoleLog, 384 * 1024)
             View.QEMU -> "── QEMU output (${store.qemuLog.name}) ──\n" + tail(store.qemuLog, 32 * 1024) +
                 "\n── QEMU -d log (${store.qemuDebugLog.name}, Developer boot option) ──\n" + tail(store.qemuDebugLog, 64 * 1024)

@@ -44,7 +44,13 @@ android {
     packaging {
         // QEMU runs as a process from nativeLibraryDir: the .so files must be
         // extracted to disk, not mapped from the APK.
-        jniLibs { useLegacyPackaging = true }
+        jniLibs {
+            useLegacyPackaging = true
+            // Ship Termux's ELF files byte for byte: AGP strips .so files when an
+            // NDK is installed (CI runners have one), and any rewrite risks the
+            // exec failure patchelf caused (see android/tools/fetch-termux-qemu.py).
+            keepDebugSymbols += "**/*.so"
+        }
     }
 
     // The boot bundle (ram.bin ~ tens of MB) is stored, not compressed, so it

@@ -74,8 +74,10 @@ def check_kernel_tools(kernel_path):
     return True
 
 
-def build_image(payload):
-    """Return (phys_base, ram_image, boot_args_pa, entry_pa)."""
+def build_image(payload, fb=None):
+    """Return (phys_base, ram_image, boot_args_pa, entry_pa).
+    fb = (base, width, height, stride) of the boot framebuffer (default: the phone's)."""
+    fb_base, fb_w, fb_h, fb_stride = fb or (FB_BASE, FB_W, FB_H, FB_STRIDE)
     magic, ver, nsegs = struct.unpack_from('<8sII', payload, 0)
     assert magic == b'SWEETXNU' and ver == 1, 'not a SWEETXNU v1 payload'
     virt_base, entry_va, adt_off, adt_size, kernel_end, phys_base, mem_size = \
@@ -92,7 +94,7 @@ def build_image(payload):
         img[o:o + fsize] = payload[foff:foff + fsize]
     img[adt_pa - phys_base:adt_pa - phys_base + adt_size] = payload[adt_off:adt_off + adt_size]
     ba = struct.pack('<HH4x4Q6QI4xQI', 2, 2, virt_base, phys_base, mem_size, top,
-                     FB_BASE, 1, FB_STRIDE, FB_W, FB_H, 32, 0, adt_pa - delta, adt_size)
+                     fb_base, 1, fb_stride, fb_w, fb_h, 32, 0, adt_pa - delta, adt_size)
     ba += cmdline + b'\0' * 4 + struct.pack('<QQ', 0, mem_size)
     assert len(ba) == 736
     img[ba_pa - phys_base:ba_pa - phys_base + len(ba)] = ba

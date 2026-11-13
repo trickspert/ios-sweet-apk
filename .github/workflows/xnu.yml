@@ -15,15 +15,29 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+  # android.yml builds the kernel through this workflow too
+  workflow_call:
+    inputs:
+      macos_version:
+        type: string
+        default: "13.5"
+      kernel_config:
+        type: string
+        default: DEVELOPMENT
+      machine_config:
+        type: string
+        default: SWEET
+      keep_going:
+        type: string
+        default: "false"
   push:
     branches: [main]
     paths:
       - "xnu/patches/**"
       - ".github/workflows/xnu.yml"
 
-concurrency:
-  group: xnu-${{ github.ref }}
-  cancel-in-progress: true
+# No workflow-level concurrency: android.yml calls this workflow and has its own
+# group; a second group here cancelled the called kernel job at start.
 
 env:
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build

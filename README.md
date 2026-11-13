@@ -8,6 +8,10 @@ As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock 
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
+## Other phones: the Sweet16 Android app
+
+[`android/`](android/README.md) is **Sweet16**, an APK that runs the same kernel and iOS 16 userland on any arm64 Android phone, Samsung Galaxy included. It runs inside an app, in QEMU, with nothing flashed. The kernel gets a virtual "sweet-virt" machine (virtio disk and touch, ramfb display; patch 0082), and the app shows its screen. It is much slower than the bare-metal Redmi port, because every instruction is emulated on the CPU.
+
 ## What works
 
 | Area | State |
@@ -157,6 +161,8 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `tools/sweet-crash.py` | Symbolicate console crash reports |
 | `tools/xnu-cc.py` | Local single-file compile check from a CI log |
 | `tools/qemu-sweet.py` | QEMU test boots with framebuffer text decoding |
+| `android/` | Sweet16, the Android app (QEMU + this kernel + your iOS 16 disk) |
+| `tools/mksweet16.sh`, `mkvirtbundle.py`, `virt-stub/`, `qemu-sweet-virt.sh` | Boot bundle of the app's virtual machine, and running it on a PC |
 | `tools/adt.py`, `remotezip.py`, `unpack_bootv2.py`, `sparsediff.py` | Helpers |
 | `NOTES.md` | Detailed engineering log: every boot, crash and decision, plus hardware facts |
 
@@ -186,6 +192,8 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0066–0067 | Fault-region crash info; console mute |
 | 0068 | IOSurface lookup semantics for already-mapped surfaces |
 | 0069 | Batched persistent-log flushes |
+| 0070–0081 | pid_hibernate, edge touches, USB device mode and Ethernet, 8 cores, display power, network trace |
+| 0082 | sweet-virt machine for the Android app: virtio-blk root, virtio tablet/keyboard, PL011 console, hvc PSCI, half-size framebuffer |
 
 ## Key hardware facts
 

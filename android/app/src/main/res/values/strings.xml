@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sweet16</string>
+    <string name="title_first">Sweet</string>
+    <string name="title_second">16</string>
+    <string name="settings">Settings</string>
+    <string name="more">More</string>
+    <string name="os_name">iOS 16</string>
+</resources>

@@ -1,0 +1,98 @@
+name: android
+
+# Sweet16 APK: the sweet XNU kernel (xnu.yml, macOS runner), its sweet-virt
+# boot bundle, Termux's QEMU for Android arm64, and the app (android/).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "android/**"
+      - "tools/**"
+      - "xnu/patches/**"
+      - ".github/workflows/android.yml"
+      - ".github/workflows/xnu.yml"
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernel:
+    uses: ./.github/workflows/xnu.yml
+    with:
+      keep_going: "false"
+
+  apk:
+    needs: kernel
+    # Build the app even when the kernel failed: it then asks for a boot bundle.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Host tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q patchelf zstd llvm
+
+      - name: QEMU for Android (Termux packages)
+        run: |
+          python3 android/tools/fetch-termux-qemu.py \
+            android/app/src/main/jniLibs/arm64-v8a android/app/src/main/assets --cache "$RUNNER_TEMP/termux"
+          ls -la android/app/src/main/jniLibs/arm64-v8a | head -80
+
+      - name: Kernel
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: xnu-kernel
+          path: xnu/out
+
+      - name: Boot files (kernel, self-test shell)
+        run: |
+          mkdir -p android/app/src/main/assets/boot
+          # sweet-sh: the interactive PID 1 of Developer boot (RAM disk, rd=md0)
+          clang -target arm64-apple-ios16.0 -c tools/sweet-shell.S -o "$RUNNER_TEMP/sweet-shell.o"
+          python3 tools/mkinit.py "$RUNNER_TEMP/sweet-shell.o" android/app/src/main/assets/boot/sweet-sh
+          ls -la xnu/out || true
+          if [ -f xnu/out/kernel.development.sweet ]; then
+            cp xnu/out/kernel.development.sweet android/app/src/main/assets/boot/kernel
+            # PC-side bundle too (same layout the app builds), for tools/qemu-sweet-virt.sh
+            tools/mksweet16.sh xnu/out/kernel.development.sweet "$RUNNER_TEMP/bundle" out-bundle.zip
+          else
+            echo "::warning::no kernel artifact: the APK ships without a kernel (pick one in Developer boot)"
+          fi
+
+      - name: APK
+        working-directory: android
+        env:
+          SWEET16_KEYSTORE_B64: ${{ secrets.SWEET16_KEYSTORE_B64 }}
+          SWEET16_KEYSTORE_PASSWORD: ${{ secrets.SWEET16_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$SWEET16_KEYSTORE_B64" ]; then
+            echo "$SWEET16_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/sweet16.keystore"
+            export SWEET16_KEYSTORE="$RUNNER_TEMP/sweet16.keystore"
+          fi
+          gradle --no-daemon testDebugUnitTest assembleRelease
+          mkdir -p ../out
+          cp app/build/outputs/apk/release/app-release.apk ../out/Sweet16-iOS16-arm64.apk
+          [ -f ../out-bundle.zip ] && mv ../out-bundle.zip ../out/sweet16-boot-bundle.zip || true
+          ls -la ../out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sweet16-apk
+          path: out/
+          if-no-files-found: error

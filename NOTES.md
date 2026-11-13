@@ -2,6 +2,11 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-13 later: HOME SCREEN + SETTINGS APP in Sweet16 on the S25 Ultra <<<
+User unlocked and opened Settings (android/docs/s25-settings.jpg). PR #3 merged into main (f3597cc). The user had
+manually published a release "Sweet16 device tree" with DT-d22ap.bin (Apple data) and was asked to delete it;
+keep Apple files out of releases.
+
 ### >>> 2026-11-13 ~16:30 UTC: 🎉 iOS 16 LOCK SCREEN + CONTROL CENTER IN SWEET16 ON A GALAXY S25 ULTRA 🎉 <<<
 Sweet16 0.2.0 (fixed signing key, slto_us/tlto_us=10 s), 4 cores / 4 GB, rootfs built on the phone (Termux VM),
 Developer boot DeviceTree = DT-d22ap.bin with "Generated + /product" (fixed `IODeviceTree:/product -> none`,

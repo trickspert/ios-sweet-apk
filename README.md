@@ -2,7 +2,7 @@
 
 **Apple's iOS 16 running on Android phones.** Two ways:
 
-- **Sweet16**, an Android app (APK) that runs iOS 16 in a virtual machine on any recent arm64 Android phone, with **no root and nothing flashed**. It's been shown on a **Samsung Galaxy S25 Ultra** reaching the iOS 16 lock screen and Control Center.
+- **Sweet16**, an Android app (APK) that runs iOS 16 in a virtual machine on any recent arm64 Android phone, with **no root and nothing flashed**. It's been shown on a **Samsung Galaxy S25 Ultra** booting to the iOS 16 lock screen, home screen and Settings.
 - **The original bare-metal port** to the Xiaomi Redmi Note 10 Pro (`sweet`), where iOS 16 replaces Android and boots to the home screen.
 
 Both run Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) with this project's patches, under the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**. iOS itself is Apple's and is not distributed here: you build the disk from an IPSW you download yourself.
@@ -12,10 +12,11 @@ Both run Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) with t
 <p>
 <img src="android/docs/s25-lock-screen.jpg" width="230" alt="iOS 16 lock screen in Sweet16 on a Galaxy S25 Ultra">
 <img src="android/docs/s25-control-center.jpg" width="230" alt="iOS 16 Control Center in Sweet16 on a Galaxy S25 Ultra">
+<img src="android/docs/s25-settings.jpg" width="230" alt="iOS 16 Settings app in Sweet16 on a Galaxy S25 Ultra">
 <img src="android/docs/launcher-ready.png" width="230" alt="The Sweet16 app">
 </p>
 
-*iOS 16 lock screen and Control Center inside Sweet16 on a Galaxy S25 Ultra (2026-11-13), and the Sweet16 launcher.*
+*iOS 16 lock screen, Control Center and the Settings app inside Sweet16 on a Galaxy S25 Ultra (2026-11-13), and the Sweet16 launcher.*
 
 ## Sweet16: iOS 16 on your Android phone
 
@@ -65,9 +66,9 @@ Tap **Start**. You see the Apple logo for a long time (about an hour on the firs
 | --- | --- |
 | Kernel | XNU boots on 4 virtual CPUs, kernel console on the serial port |
 | iOS userland | launchd, the system daemons, backboardd, SpringBoard |
-| Screen | Apple logo, **lock screen**, **Control Center** (iOS draws at 1125×2436, shown at half size) |
+| Screen | Apple logo, **lock screen**, **Control Center**, **home screen**, the **Settings** app (iOS draws at 1125×2436, shown at half size) |
 | Input | Touch and swipes (virtual tablet), Home, Lock and volume buttons |
-| Not working | Internet / Wi-Fi, sound, camera, GPS, Bluetooth, App Store, GPU; the date shows Dec 31 (no clock chip yet); home screen not confirmed yet |
+| Not working | Internet / Wi-Fi, sound, camera, GPS, Bluetooth, App Store, GPU; the date shows Dec 31 (no clock chip yet) |
 
 ### How Sweet16 works
 
@@ -83,7 +84,7 @@ Kernel side: patch `xnu/patches/0082-sweet-virt-machine.patch` (virtio disk/inpu
 
 ### What's not in this repository
 
-The IPSW, the iOS disk (`rootfs.img`), the device tree (`DT-d22ap.bin`) and any other Apple file. They are Apple's copyrighted software: everyone builds them from their own IPSW with the scripts above. Please don't upload them to issues or forks.
+The IPSW, the iOS disk (`rootfs.img`), the device tree (`DT-d22ap.bin`) and any other Apple file. They are Apple's copyrighted software: everyone builds them from their own IPSW with the scripts above (the Termux script writes `DT-d22ap.bin` too). Please don't upload them to issues, releases or forks.
 
 ## The original port: Redmi Note 10 Pro (bare metal)
 

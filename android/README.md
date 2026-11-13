@@ -32,6 +32,25 @@ There is no GPU and no hardware virtualization (Android does not give apps KVM).
 
 On Samsung phones, open **Settings → Battery: allow background use** in the app. Otherwise One UI may stop the virtual machine when you leave the app.
 
+## Building the iOS disk on the phone (Termux, no root)
+
+`tools/mkiosroot.sh` needs root: it mounts the IPSW's APFS images with apfs-fuse and the new HFS+ image with `mount -o loop`. Android does not allow that on an unrooted phone, not even in Termux or proot. `tools/termux/mkiosroot-termux.sh` therefore runs a small Ubuntu arm64 VM in Termux's QEMU, and inside the VM, as root, the unchanged `mkiosroot.sh` and `sweet-root-tweaks.py`. The IPSW is attached to the VM as a read-only disk and the output image as a second disk, so nothing is unpacked on the phone itself.
+
+```sh
+# Termux from F-Droid or GitHub (the Play Store build is outdated)
+termux-setup-storage                       # allow access to /sdcard
+pkg update
+pkg install git qemu-system-aarch64-headless qemu-utils mtools dosfstools curl
+git clone -b claude/ios-apk-samsung-conversion-aqhpqn https://github.com/trickspert/ios-sweet-apk ~/ios-sweet-apk
+termux-wake-lock                           # keep Termux running with the screen off
+cd ~/ios-sweet-apk
+bash tools/termux/mkiosroot-termux.sh "/sdcard/Download/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw" /sdcard/Download/rootfs.img
+```
+
+It prints the VM's boot and `SWEET16:` progress lines, then "done". In Sweet16, tap **Import** and pick `Download/rootfs.img`. The VM also leaves `DT-d22ap.bin` (the raw iPhone X device tree) there; pick it under Developer boot → Pick DeviceTree. `rootfs-job.log` has the full log.
+
+The VM is emulated (Android gives apps no hardware virtualization), so this takes hours: the Ubuntu boot, installing tools and compiling apfs-fuse, extracting about 6 GB from the IPSW, then copying the whole system into HFS+. Keep the phone on the charger. It needs internet (Ubuntu cloud image about 600 MB, packages in the VM), about 15 GB free in Termux's own storage for the VM disk, and 16 GB for `rootfs.img`. If it stops, run it again with `SWEET16_KEEP_VM=1` in front: the VM disk is kept, so the package install, the apfs-fuse build and the extraction are skipped.
+
 ## Developer boot: check that XNU really runs
 
 Before iOS 16 goes to SpringBoard, check that the kernel itself runs. **⋮ → Developer boot (verbose, your files)** picks every boot input:

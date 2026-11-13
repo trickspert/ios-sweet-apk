@@ -30,6 +30,7 @@ class Store(private val context: Context) {
     val qemuLog = File(files, "qemu.log")
     val qemuDebugLog = File(files, "qemu-debug.log")
     val lastLaunch = File(files, "last-launch.txt")
+    val launchLog = File(files, "launch.log")
     val bootDir = File(context.cacheDir, "boot")
     val selftestRamdisk = File(files, "sweet-sh")
     val vncSocket = File(context.cacheDir, "vnc.sock")

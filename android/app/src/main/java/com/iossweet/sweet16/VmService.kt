@@ -17,6 +17,11 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** What the VM is doing; observed by the activities (main thread). */
@@ -75,19 +80,44 @@ class VmService : Service() {
     }
 
     private fun startVm(profile: String) {
-        if (process != null) return
-        goForeground()
+        if (process != null || launching) return
+        launching = true
+        val store = Store(this)
+        val log = LaunchLog(store.launchLog)
+        log.line("service started: profile=$profile, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), " +
+            "${Build.MANUFACTURER} ${Build.MODEL}, ABIs ${Build.SUPPORTED_ABIS.joinToString(",")}")
+        try {
+            goForeground()
+            log.line("foreground service: ok")
+        } catch (t: Throwable) {
+            // Keep going without it: QEMU may still run while the app is open.
+            log.error("foreground service refused (VM may be stopped in the background)", t)
+        }
         VmState.set(VmState.Phase.STARTING, "Building the boot image", profile)
-        Thread({ launch(profile) }, "qemu-launch").start()
+        Thread({ launch(profile, store, log) }, "qemu-launch").start()
     }
 
-    private fun launch(profile: String) {
-        val store = Store(this)
+    @Volatile private var launching = false
+
+    private fun launch(profile: String, store: Store, log: LaunchLog) {
         try {
             store.installQemuData()
+            val libDir = File(store.nativeLibDir())
             val qemu = store.qemuBinary()
-            if (!qemu.isFile) throw IllegalStateException("QEMU is not in this APK (${qemu.path})")
+            log.line("nativeLibraryDir: ${libDir.path} (${libDir.list()?.size ?: -1} files)")
+            log.line("libqemu.so: exists=${qemu.isFile} size=${qemu.length()} canExecute=${qemu.canExecute()}")
+            if (!qemu.isFile) throw IllegalStateException("QEMU is not in this APK (${qemu.path}); is extractNativeLibs on?")
+
+            // Pre-flight: does the binary load at all (dynamic linker, libraries)?
+            VmState.set(VmState.Phase.STARTING, "Checking QEMU", profile)
+            val pre = runCaptured(store, listOf(qemu.path, "--version"), 15_000)
+            log.line("pre-flight `libqemu.so --version`: exit=${pre.first}\n" + pre.second.trim().prependIndent("    "))
+            if (pre.first != 0) throw IllegalStateException("QEMU does not start on this phone (exit ${pre.first}):\n" + pre.second.trim())
+
+            VmState.set(VmState.Phase.STARTING, "Building the boot image", profile)
+            val t0 = System.currentTimeMillis()
             val launch = Launch.prepare(store, profile)
+            log.line("boot image built in ${System.currentTimeMillis() - t0} ms:\n" + launch.image.summary.trim().prependIndent("    "))
             store.vncSocket.delete()
             store.qmpSocket.delete()
             store.serialSocket.delete()
@@ -96,19 +126,18 @@ class VmService : Service() {
             // Exactly what runs, for "Boot details" and bug reports.
             store.lastLaunch.writeText(launch.describe(store))
             val args = launch.args
+            log.line("command:\n" + launch.commandLine(store).prependIndent("    "))
             Log.i(TAG, "qemu " + args.joinToString(" "))
             val pb = ProcessBuilder(listOf(qemu.path) + args)
                 .directory(filesDir)
                 .redirectErrorStream(true)
                 .redirectOutput(store.qemuLog)
-            pb.environment().apply {
-                put("LD_LIBRARY_PATH", store.nativeLibDir())
-                put("TMPDIR", cacheDir.path)
-                put("HOME", filesDir.path)
-            }
+            env(pb, store)
             store.qemuLog.writeText("")
+            VmState.set(VmState.Phase.STARTING, "Starting QEMU", profile)
             val p = pb.start()
             process = p
+            log.line("QEMU started, pid ${pidOf(p)}")
             acquireWakeLock()
             // Wait for QEMU's VNC socket: then the machine is up.
             val deadline = System.currentTimeMillis() + 30_000
@@ -116,29 +145,62 @@ class VmService : Service() {
                 Thread.sleep(100)
             }
             if (!p.isAliveCompat()) {
-                throw IllegalStateException("QEMU exited: " + store.qemuLog.readTail(600))
+                throw IllegalStateException("QEMU exited (${p.exitValue()}): " + store.qemuLog.readTail(1500))
             }
+            log.line("VNC socket ${if (store.vncSocket.exists()) "up" else "not up after 30 s"}; machine running")
             VmState.set(VmState.Phase.RUNNING, "QEMU is running (pid ${pidOf(p)})", profile)
             val code = p.waitFor()
             process = null
+            log.line("QEMU exited with $code")
             if (VmState.phase != VmState.Phase.STOPPED) {
                 if (code == 0) VmState.set(VmState.Phase.STOPPED, "The virtual machine stopped")
                 else VmState.set(VmState.Phase.FAILED, "QEMU exited ($code): " + store.qemuLog.readTail(400))
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "launch failed", e)
+        } catch (t: Throwable) {
+            Log.e(TAG, "launch failed", t)
+            log.error("launch failed", t)
             process?.destroy()
             process = null
-            VmState.set(VmState.Phase.FAILED, e.message ?: e.toString())
+            VmState.set(VmState.Phase.FAILED, t.message ?: t.toString())
         } finally {
+            launching = false
             releaseWakeLock()
             Handler(Looper.getMainLooper()).post {
                 if (process == null) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
                     stopSelf()
                 }
             }
         }
+    }
+
+    private fun env(pb: ProcessBuilder, store: Store) {
+        pb.environment().apply {
+            put("LD_LIBRARY_PATH", store.nativeLibDir())
+            put("TMPDIR", cacheDir.path)
+            put("HOME", filesDir.path)
+        }
+    }
+
+    /** Run a short command; returns (exit code, combined output). */
+    private fun runCaptured(store: Store, cmd: List<String>, timeoutMs: Long): Pair<Int, String> {
+        val pb = ProcessBuilder(cmd).directory(filesDir).redirectErrorStream(true)
+        env(pb, store)
+        val p = try {
+            pb.start()
+        } catch (e: Exception) {
+            return -1 to "cannot execute ${cmd[0]}: $e"
+        }
+        val out = StringBuilder()
+        val reader = Thread { try { out.append(p.inputStream.bufferedReader().readText()) } catch (_: Exception) {} }
+        reader.start()
+        if (!p.waitForCompat(timeoutMs)) {
+            p.destroyForcibly()
+            reader.join(1000)
+            return -2 to "timed out after $timeoutMs ms\n$out"
+        }
+        reader.join(2000)
+        return p.exitValue() to out.toString()
     }
 
     private fun stopVm() {
@@ -252,4 +314,23 @@ fun File.readTail(max: Int): String = try {
     if (t.length > max) t.substring(t.length - max) else t
 } catch (e: Exception) {
     ""
+}
+
+/** Step-by-step record of one launch (files/launch.log), shown on the Console screen. */
+class LaunchLog(private val file: File) {
+    init {
+        file.writeText("")
+    }
+
+    @Synchronized
+    fun line(msg: String) {
+        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        file.appendText("[$ts] $msg\n")
+    }
+
+    fun error(msg: String, t: Throwable) {
+        val sw = StringWriter()
+        t.printStackTrace(PrintWriter(sw))
+        line("ERROR: $msg: $t\n" + sw.toString().prependIndent("    "))
+    }
 }

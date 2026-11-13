@@ -2,6 +2,22 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-13 03:05 UTC: FIRST REAL XNU BOOT ON THE VIRT MACHINE (PC QEMU 8.2) <<<
+CI android #5 (run 43353401287, macos-15 + Xcode 16.0, patches 0082+0083) PASSED; kernel artifact has
+_sweet_vblk_init, _sweet_virt_start, presentScaled, vmapple_uart_init. Artifacts downloaded here (environment
+allows productionresultssa31.blob.core.windows.net). The app's Kotlin BootBuilder (RealKernelTest with
+SWEET16_KERNEL) builds ram.bin from it: 10 segments, 0 chained fixups, entry 0xb148c488, boot_args 0xb24d4000.
+`tools/qemu-sweet-virt.sh` (the app's args), cpus=1, self-test RAM disk, OBSERVED on the PL011 console:
+`Darwin Kernel Version 22.6.0 ... xnu-8796.141.3` -> `BSD root: md0` -> `*** SWEET userspace: sweet-sh running as PID 1 ***`
+-> prompt after ~35 s (TCG on x86); `uname`/`hw` answered by the kernel (hw.machine iPhone10,3, hw.model D22AP).
+Bugs found and fixed: sweet-sh passed no namelen to the sysctlbyname trap ("sysctl failed"); cpus=4 panicked
+`SWEET CPU: invalid topology cpu=1 mpidr=0x1` (SweetCPU.cpp expected Aff1 numbering) -> 0082 accepts MPIDR<16 when
+psci-hvc (UNVERIFIED until the next CI kernel).
+User's phone (Samsung, CI APK #5): Developer boot -> Console/qemu.log "(nothing yet)", "no QMP socket". Cause unknown
+(no logs reached the screen). App now writes files/launch.log (device, nativeLibraryDir, libqemu.so exists/size/
+canExecute, pre-flight `libqemu.so --version` output, boot image summary, command, pid, exit code, stack traces)
+and the Console shows it ("Launch log") plus the live VM state line; foreground-service refusal no longer aborts.
+
 ### >>> CI 2026-11-13 02:40 UTC: why the kernel job was cancelled <<<
 `runner-probe.yml` (run 43353091183): macos-15, macos-latest, macos-26, ubuntu-24.04 get runners in ~2 s;
 **macos-14 is cancelled at once (no runner, 0 ms)** = that image is retired. Not billing, not concurrency.

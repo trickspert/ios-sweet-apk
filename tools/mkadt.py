@@ -2,7 +2,9 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+address comes from the sweet live FDT. Usage:
+  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+  mkadt.py OUT.adt --virt [--ram-mb N]     (QEMU virt machine, Android app)
 """
 import hashlib, os, struct, sys
 
@@ -38,6 +40,16 @@ VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
+# --virt: the "sweet-virt" machine of the Android app (bsd/dev/sweet_virtio.c):
+# QEMU virt with -m RAM_MB. Its RAM starts at 0x40000000; the kernel takes
+# everything from PHYS_BASE up (the framebuffer at 0x9c000000 stays below).
+QEMU_RAM_BASE = 0x40000000
+QEMU_VIRTIO_MMIO, QEMU_VIRTIO_STRIDE, QEMU_VIRTIO_COUNT = 0x0a000000, 0x200, 32
+QEMU_PL011 = 0x09000000
+VIRT_CPUS = 8
+# Its framebuffer is half the presented 1125x2436 display (sweetfb_scale=2):
+# QEMU's VNC server takes at most 2160 rows; width a multiple of 16.
+VIRT_FB_W, VIRT_FB_H = 560, 1218
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 
@@ -74,9 +86,16 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
-    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
+def build(seed=None, qemu=False, highmem=False, virt=False, ram_mb=4096):
+    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
+    virt=True: QEMU virt as a full machine (virtio disk/input, PL011, SMP over hvc PSCI)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+    if virt:
+        qemu = True
+        ram_end = QEMU_RAM_BASE + (ram_mb << 20)
+        if ram_end <= PHYS_BASE + (512 << 20):
+            raise SystemExit(f'--ram-mb {ram_mb}: too small, the kernel needs RAM above {PHYS_BASE:#x}')
+        phys_base, mem_size = PHYS_BASE, ram_end - PHYS_BASE
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -133,13 +152,14 @@ def build(seed=None, qemu=False, highmem=False):
     # 6-7 Cortex-A76), one homogeneous cluster. The kernel defaults to one
     # and uses cpus=N to select an initial prefix (N <= 8).
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
+    # --virt: QEMU virt numbers its CPUs in Aff0 (MPIDR = n for n < 16).
     cpu_nodes = []
-    for core in range(1 if qemu else 8):
+    for core in range(VIRT_CPUS if virt else 1 if qemu else 8):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
             ('compatible', cstr('qcom,kryo470') + cstr('ARM,v8')),
-            ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
+            ('reg', u32(core if virt else core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
             ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
@@ -149,7 +169,7 @@ def build(seed=None, qemu=False, highmem=False):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            ('clock-frequency', u32(2304000000 if core >= 6 and not virt else 1804800000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -189,12 +209,13 @@ def build(seed=None, qemu=False, highmem=False):
             ('canvas-height', u32(2436)),
         ])])
 
+    fb_w, fb_h = (VIRT_FB_W, VIRT_FB_H) if virt else (FB_W, FB_H)
     fbcon = node('sweet-fbcon', [
         ph(),
         ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
+        ('width', u32(fb_w)),
+        ('height', u32(fb_h)),
+        ('stride', u32(fb_w * 4)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
@@ -219,6 +240,16 @@ def build(seed=None, qemu=False, highmem=False):
         ('opposed-power-vol-buttons', u32(1)),
     ])
 
+    # bsd/dev/sweet_virtio.c: virtio-mmio transports, the console UART and
+    # the PSCI conduit of QEMU virt (no EL2/EL3: PSCI is an hvc).
+    virtio = virt and node('sweet-virtio', [
+        ph(),
+        ('compatible', cstr('sweet,virt')),
+        ('reg', u64(QEMU_VIRTIO_MMIO, QEMU_VIRTIO_STRIDE, QEMU_VIRTIO_COUNT)),
+        ('uart', u64(QEMU_PL011)),
+        ('psci-hvc', u32(1)),
+    ])
+
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
@@ -238,11 +269,14 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product
+        + ([virtio] if virt else [] if qemu else [ufs]))
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    ram_mb = int(sys.argv[sys.argv.index('--ram-mb') + 1]) if '--ram-mb' in sys.argv else 4096
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+                 virt='--virt' in sys.argv, ram_mb=ram_mb)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

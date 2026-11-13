@@ -153,10 +153,10 @@ index 6b926fe..0138fc4 100644
  	sweet_touch_init();
 diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
 new file mode 100644
-index 0000000..660434b
+index 0000000..c8b164e
 --- /dev/null
 +++ b/bsd/dev/sweet_virtio.c
-@@ -0,0 +1,643 @@
+@@ -0,0 +1,649 @@
 +/*
 + * SWEET virtual machine ("sweet-virt"): the same kernel and iOS 16 userland
 + * inside QEMU's virt board, e.g. in the ios-sweet Android app on any arm64
@@ -680,10 +680,16 @@ index 0000000..660434b
 +		}
 +		break;
 +	case EV_SYN:
-+		/* Panel pixels, as the Goodix driver reports them. */
++		/*
++		 * The tablet spans the whole presented display (1125x2436, see
++		 * SweetFramebuffer.cpp); SweetHID takes panel pixels of the
++		 * centered 1080x2400 part, as the Goodix driver reports them.
++		 */
 +		if (v->down || v->sent_down) {
-+			int px = (int)(((uint64_t)MIN(v->x, v->max_x) * 1080) / ((uint64_t)v->max_x + 1));
-+			int py = (int)(((uint64_t)MIN(v->y, v->max_y) * 2400) / ((uint64_t)v->max_y + 1));
++			int px = (int)(((uint64_t)MIN(v->x, v->max_x) * 1125) / ((uint64_t)v->max_x + 1)) - 22;
++			int py = (int)(((uint64_t)MIN(v->y, v->max_y) * 2436) / ((uint64_t)v->max_y + 1)) - 18;
++			px = px < 0 ? 0 : (px > 1079 ? 1079 : px);
++			py = py < 0 ? 0 : (py > 2399 ? 2399 : py);
 +			if (v->down != v->sent_down || v->moved) {
 +				sweet_hid_touch(0, v->down, px, py);
 +			}
@@ -857,3 +863,140 @@ index 2545cf9..0f8d7d0 100644
  	return (int32_t)x0;
  }
  
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..5c54bba 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -77,6 +77,11 @@ enum {
+  * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+  * centered 1080x2400 part of it is shown on the 1080x2400 panel.
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
++ *
++ * Boot-arg sweetfb_scale=N (the sweet-virt machine uses 2): the panel memory
++ * is 1/N of the presented size in each direction (560x1218 for 1125x2436)
++ * and frames are downsampled (nearest pixel) when shown. QEMU's VNC server
++ * takes at most 2160 rows, and the smaller copy is cheaper in emulation.
+  */
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+@@ -104,6 +109,7 @@ public:
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++	uint32_t      fScale;                   /* logical pixels per panel pixel */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -122,6 +128,7 @@ public:
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
++	void presentScaled(SweetSurface *s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -168,14 +175,17 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = fWidth;
+-	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	uint32_t scale = 1;
++	PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));
++	fScale = (scale >= 1 && scale <= 4) ? scale : 1;
++	fLogicalW = fWidth * fScale;
++	fLogicalH = fHeight * fScale;
++	if (!native && fWidth * fScale <= SWEET_FB_LOGICAL_W && fHeight * fScale <= SWEET_FB_LOGICAL_H) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	fOffX = (int32_t)(fLogicalW - fWidth * fScale) / 2;
++	fOffY = (int32_t)(fLogicalH - fHeight * fScale) / 2;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -201,8 +211,8 @@ AppleCLCD::start(IOService *provider)
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
+-	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+-	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u (scale %u)\n",
++	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH, fScale);
+ 	return true;
+ }
+ 
+@@ -359,6 +369,11 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
++		if (fScale > 1) {
++			presentScaled(s, sx, sy, dx, dy, w, h);
++			s->release();
++			continue;
++		}
+ 		/* Logical (presented) display coordinates -> panel coordinates. */
+ 		dx -= fOffX;
+ 		dy -= fOffY;
+@@ -401,6 +416,58 @@ AppleCLCD::present(const uint8_t *rec)
+ 	}
+ }
+ 
++/*
++ * sweetfb_scale: show the surface rectangle (sx,sy) w x h, placed at logical
++ * (dx,dy), on a panel of 1/fScale size: every panel pixel takes the source
++ * pixel at its logical position.
++ */
++void
++AppleCLCD::presentScaled(SweetSurface *s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	const int32_t k = (int32_t)fScale;
++	uintptr_t src = s->kernelAddress();
++
++	if (src == 0 || (s->bytesPerElement && s->bytesPerElement != 4) ||
++	    s->elementWidth != 1 || s->elementHeight != 1 || s->memory == NULL) {
++		return;
++	}
++	if (w > (int32_t)s->width - sx) {
++		w = (int32_t)s->width - sx;
++	}
++	if (h > (int32_t)s->height - sy) {
++		h = (int32_t)s->height - sy;
++	}
++	if (w > (int32_t)fLogicalW - dx) {
++		w = (int32_t)fLogicalW - dx;
++	}
++	if (h > (int32_t)fLogicalH - dy) {
++		h = (int32_t)fLogicalH - dy;
++	}
++	if (w <= 0 || h <= 0) {
++		return;
++	}
++	uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow + (uint64_t)(sx + w) * 4;
++	if (last > s->memory->getLength()) {
++		return;
++	}
++	/* Panel pixels p with dx <= p * k + fOffX < dx + w (same for y). */
++	int32_t px0 = dx - fOffX <= 0 ? 0 : (dx - fOffX + k - 1) / k;
++	int32_t px1 = dx + w - fOffX <= 0 ? 0 : (dx + w - fOffX + k - 1) / k;
++	int32_t py0 = dy - fOffY <= 0 ? 0 : (dy - fOffY + k - 1) / k;
++	int32_t py1 = dy + h - fOffY <= 0 ? 0 : (dy + h - fOffY + k - 1) / k;
++	px1 = px1 > (int32_t)fWidth ? (int32_t)fWidth : px1;
++	py1 = py1 > (int32_t)fHeight ? (int32_t)fHeight : py1;
++	for (int32_t py = py0; py < py1; py++) {
++		int32_t ly = py * k + fOffY - dy + sy;
++		const uint32_t *in = (const uint32_t *)(src + s->offset + (uint64_t)ly * s->bytesPerRow);
++		uint32_t *out = (uint32_t *)(fPixels + (uint64_t)py * fRowBytes);
++		int32_t lx = px0 * k + fOffX - dx + sx;
++		for (int32_t px = px0; px < px1; px++, lx += k) {
++			out[px] = in[lx];
++		}
++	}
++}
++
+ bool
+ IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+ {

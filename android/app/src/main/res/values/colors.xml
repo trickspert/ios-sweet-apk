@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FF000000</color>
+    <color name="banner">#FF17243D</color>
+    <color name="banner_icon">#FF5B8DEF</color>
+    <color name="accent">#FF2E6BE6</color>
+    <color name="accent_text">#FF3D7BFF</color>
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#FFB4BFD3</color>
+    <color name="chip_bg">#CC0E0E14</color>
+    <color name="card_stroke">#40FFFFFF</color>
+    <color name="sheet_bg">#FF121821</color>
+    <color name="danger">#FFE5484D</color>
+</resources>

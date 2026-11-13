@@ -30,6 +30,8 @@ class Launch private constructor(
     }
 
     companion object {
+        /** Spinlock / ticket-lock panic timeouts on the virtual machine: 10 s. */
+        const val LOCK_TIMEOUT_US = 10_000_000
         const val IOS = "ios"
         const val DEV = "dev"
 
@@ -62,9 +64,13 @@ class Launch private constructor(
                     else -> null
                 }
             }
-            // Machine-dependent words the app owns: cores and the half-size framebuffer.
-            val line = words.filter { it.isNotBlank() && !it.startsWith("cpus=") && !it.startsWith("sweetfb_scale=") } +
-                listOf("cpus=$cores", "sweetfb_scale=2")
+            // Machine-dependent words the app owns: cores, the half-size framebuffer, and
+            // lock timeouts. Android can pause a virtual CPU for a second while it holds a
+            // spinlock; XNU's defaults (0.25 s / 0.125 s ticket locks) then panic:
+            // "Ticket spinlock ... timeout after 52286220 ticks" on a Galaxy S25 Ultra.
+            val owned = listOf("cpus=", "sweetfb_scale=", "slto_us=", "tlto_us=")
+            val line = words.filter { w -> w.isNotBlank() && owned.none { w.startsWith(it) } } +
+                listOf("cpus=$cores", "sweetfb_scale=2", "slto_us=$LOCK_TIMEOUT_US", "tlto_us=$LOCK_TIMEOUT_US")
             val image = BootBuilder.build(
                 BootBuilder.Plan(store.kernelBytes(), store.ramMb, line.joinToString(" "), adtMode, apple, ramdisk),
                 store.stubTemplate(), store.bootDir)

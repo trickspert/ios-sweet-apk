@@ -4,6 +4,10 @@
 #
 #   mkiosroot.sh OS.dmg SYSTEMOS.dmg APPOS.dmg OUT.img [SIZE]     (SIZE default 16G)
 #
+# OUT may also be a block device (it is formatted whole; SIZE is ignored):
+# tools/termux/mkiosroot-termux.sh runs this script as root inside a small
+# Linux VM on an unrooted phone, with the output image attached as a disk.
+#
 # The IPSW images are raw APFS with LZBITMAP-compressed files: they are read
 # through apfs-fuse (decompressing), so the HFS+ copy is uncompressed. On a
 # device /private/preboot is its own volume holding the cryptexes, which
@@ -20,7 +24,12 @@ set -euo pipefail
 
 [[ $# -ge 4 ]] || { sed -n '2,12p' "$0"; exit 2; }
 os=$(realpath "$1") sysos=$(realpath "$2") appos=$(realpath "$3") out=$4 size=${5:-16G}
-[[ ! -e $out ]] || { echo "refusing to overwrite $out" >&2; exit 1; }
+if [[ -b $out ]]; then
+	is_dev=1
+else
+	is_dev=0
+	[[ ! -e $out ]] || { echo "refusing to overwrite $out" >&2; exit 1; }
+fi
 
 # Pre-flight tool check
 missing_tools=()
@@ -71,10 +80,14 @@ apfs_mount "$os" os
 apfs_mount "$sysos" sysos
 apfs_mount "$appos" appos
 
-truncate -s "$size" "$out"
+[[ $is_dev == 1 ]] || truncate -s "$size" "$out"
 mkfs.hfsplus -s -J -v iOSRoot "$out"
 mkdir "$work/root"
-sudo mount -t hfsplus -o loop,force "$out" "$work/root"
+if [[ $is_dev == 1 ]]; then
+	sudo mount -t hfsplus -o force "$out" "$work/root"
+else
+	sudo mount -t hfsplus -o loop,force "$out" "$work/root"
+fi
 mounts=("$work/root" "${mounts[@]}")
 
 copy() {

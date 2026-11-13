@@ -2,6 +2,39 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-13 ~16:30 UTC: 🎉 iOS 16 LOCK SCREEN + CONTROL CENTER IN SWEET16 ON A GALAXY S25 ULTRA 🎉 <<<
+Sweet16 0.2.0 (fixed signing key, slto_us/tlto_us=10 s), 4 cores / 4 GB, rootfs built on the phone (Termux VM),
+Developer boot DeviceTree = DT-d22ap.bin with "Generated + /product" (fixed `IODeviceTree:/product -> none`,
+now `-> IOPlatformDevice`). After ~1 h on the Apple logo and a black phase: lock screen (clock, camera button,
+battery 100% charging) and Control Center (airplane/AirDrop/Wi-Fi/Bluetooth tiles, Now Playing "Loading...",
+brightness/volume, Focus) drawn by SpringBoard through ramfb; touch gestures work.
+Observed oddities: date shows "Wednesday, December 31" (no RTC: QEMU virt's PL031 is not used by the kernel ->
+time near the epoch); lock-screen clock is red (cause unknown: tint/Focus or a colour path; Control Center colours
+look right). NEXT: unlock (swipe up) -> home screen; RTC; README/Release.
+
+### >>> 2026-11-13 ~15:45 UTC: second S25 boot (kernel log off) -> Apple logo, then panic <<<
+- With "Show the kernel log" off: Apple logo ~4+ min, then black with fbcon lines from identityservicesd
+  (`SK[n]: __nexus_register ... nxprov_create: 1`, Skywalk retries, no network: harmless), then
+  `panic(cpu 3 ...): Ticket spinlock[...] timeout after 52286220 ticks; ... timeout: 3000000 @lock_ticket.c:386`
+  (0.84 s held vs 48 ms default at 62.5 MHz): a vCPU descheduled by Android while holding a spinlock.
+- FIX (app, no kernel rebuild): Launch.kt always appends `slto_us=10000000 tlto_us=10000000` (xnu-8796
+  ml_init_lock_timeout boot-args; spin and ticket lock panic timeouts 10 s).
+- Console screen: re-set the log text only when the file changes (it reset the scroll every 0.7 s), follow mode
+  only at the bottom, Copy log (last 60 KB to the clipboard) and Bottom buttons.
+
+### >>> 2026-11-13 ~11:10 UTC: iOS 16 USERLAND + APPLE LOGO ON A SAMSUNG GALAXY S25 ULTRA (Sweet16) <<<
+User's S25 Ultra (Snapdragon 8 Elite, One UI, KernelSU present but unused), Sweet16 = local fix139 APK (unmodified
+Termux QEMU, CI #6 kernel), 4 cores, 4 GB. rootfs.img built ON THE PHONE by tools/termux/mkiosroot-termux.sh from
+iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw: Ubuntu VM run took ~4 h 12 min (15136 s), "== done".
+Imported via SAF -> "iOS 16 is ready". OBSERVED (user screenshots of the guest framebuffer):
+- kernel: `SWEET CPU: 4/4 CPUs initialized, SGI1 verified`, BSD init, MAC framework
+- launchd + daemons: exec nfcd, driverkitd, sharingd, lockdownd, keybagd, configd, backboardd, mediaserverd,
+  logd, UserEventAgent, ... ; `SWEET AKS: chronod/sharingd/coreduetd/SpringBoard sel ...` -> AppleKeyStore stub works
+- **Apple logo drawn** (backboardd/CoreAnimation through ramfb, 560x1218 downscaled framebuffer)
+- **SpringBoard started**; datamigrator and profiled running
+- **virtio tablet touch reaches SweetHID**: `SWEET HID: touch 0 down at 914,2009 ... up at 948,1643`
+NEXT: wait for the lock screen (datamigrator can take long on first boot); then input/latency, then networking.
+
 ### >>> 2026-11-13 03:40 UTC: phone exit 139 root-caused + fixed; SMP verified <<<
 - User's Samsung (CI APK #6, new Launch log): pre-flight `libqemu.so --version` exit 139 (SIGSEGV), nothing printed.
 - ROOT CAUSE (reproduced here): fetch-termux-qemu.py ran patchelf (--set-soname/--replace-needed/--remove-rpath) and

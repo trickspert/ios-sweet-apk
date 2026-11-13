@@ -1,0 +1,859 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 6630131..ee8656b 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_virtio.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 6b926fe..0138fc4 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,12 @@ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++/* bsd/dev/sweet_virtio.c: the virtual machine (QEMU virt, Android app) */
++extern int sweet_virt_present(void);
++extern int sweet_vblk_init(uint64_t *sectors, bool *can_flush);
++extern int sweet_vblk_io(uint64_t sector, uint64_t pa, uint32_t len, bool write);
++extern int sweet_vblk_flush(void);
++extern void sweet_virt_start(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -109,6 +115,7 @@ static struct {
+ 	bool writable;                          /* boot-arg ufsrw=1 */
+ 	bool cache;                             /* boot-arg ufscache=1 */
+ 	bool wait;                              /* boot-arg ufswait=1 */
++	bool virt;                              /* virtio-blk disk instead of UFS */
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+ 	bool ready;
+@@ -263,6 +270,9 @@ ufs_read_blocks(uint64_t lba, uint32_t count)
+ 	if (lba > UINT32_MAX || count > BOUNCE_SIZE / UFS_BLOCK) {
+ 		return EINVAL;
+ 	}
++	if (su.virt) {
++		return sweet_vblk_io(lba * (UFS_BLOCK / 512), su.dma_pa + DMA_BOUNCE, count * UFS_BLOCK, false);
++	}
+ 	uint8_t cdb[10] = {
+ 		0x28, 0,
+ 		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+@@ -284,6 +294,9 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
+ 		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
+ 		return EPERM;
+ 	}
++	if (su.virt) {
++		return sweet_vblk_io(lba * (UFS_BLOCK / 512), su.dma_pa + DMA_BOUNCE, count * UFS_BLOCK, true);
++	}
+ 	uint8_t cdb[10] = {
+ 		0x2a, 0,
+ 		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+@@ -296,6 +309,9 @@ static int
+ ufs_sync_cache(void)
+ {
+ 	static const uint8_t cdb[10] = { 0x35 };       /* SYNCHRONIZE CACHE(10), whole LUN */
++	if (su.virt) {
++		return sweet_vblk_flush();
++	}
+ 	return ufs_scsi(cdb, sizeof(cdb), 0, false);
+ }
+ 
+@@ -595,8 +611,12 @@ sweet_ufs_init(void)
+ 	if (SecureDTLookupEntry(NULL, "/sweet-ufs", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 2 * sizeof(uintptr_t)) {
+-		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
+-		return ENXIO;
++		reg = NULL;
++		su.virt = sweet_virt_present() != 0;
++		if (!su.virt) {
++			printf("SWEET UFS: no /sweet-ufs or /sweet-virtio node in the device tree\n");
++			return ENXIO;
++		}
+ 	}
+ 	PE_parse_boot_argn("ufsroot", want, sizeof(want));
+ 	uint32_t rw = 0;
+@@ -607,7 +627,9 @@ sweet_ufs_init(void)
+ 	su.cache = (cache == 1);
+ 	su.wait = (wait == 1);
+ 
+-	su.regs = ml_io_map(reg[0], reg[1]);
++	if (!su.virt) {
++		su.regs = ml_io_map(reg[0], reg[1]);
++	}
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET UFS: no contiguous DMA memory\n");
+@@ -622,15 +644,33 @@ sweet_ufs_init(void)
+ 	su.secsize = DEV_BSIZE;
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+-	error = ufs_take_over_host();
+-	if (!error) {
+-		static const uint8_t tur[6] = { 0x00 };
+-		/* The first command after the bootloader may report a unit attention. */
+-		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++	if (su.virt) {
++		/*
++		 * Virtual machine: the whole virtio disk is the root volume (the
++		 * HFS+ image from tools/mkiosroot.sh, no partition table).
++		 */
++		uint64_t sectors = 0;
++		bool can_flush = false;
++		error = sweet_vblk_init(&sectors, &can_flush);
++		if (!error && sectors < 2 * (UFS_BLOCK / 512)) {
++			error = ENXIO;
++		}
++		if (!error) {
++			su.first_block = 0;
++			su.nblocks = sectors / (UFS_BLOCK / 512);
++			strlcpy(want, "virtio disk", sizeof(want));
++		}
++	} else {
++		error = ufs_take_over_host();
++		if (!error) {
++			static const uint8_t tur[6] = { 0x00 };
++			/* The first command after the bootloader may report a unit attention. */
++			for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++			}
++		}
++		if (!error) {
++			error = ufs_find_partition(want);
+ 		}
+-	}
+-	if (!error) {
+-		error = ufs_find_partition(want);
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+ 	if (error) {
+@@ -654,8 +694,16 @@ sweet_ufs_init(void)
+ 	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+-	sweet_log_start();
+ 	sweet_sample_start();
++	if (su.virt) {
++		/*
++		 * No persistent log on the disk: the image ends with the HFS+
++		 * alternate volume header. The console goes to the PL011 instead.
++		 */
++		sweet_virt_start();
++		return 0;
++	}
++	sweet_log_start();
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
+new file mode 100644
+index 0000000..660434b
+--- /dev/null
++++ b/bsd/dev/sweet_virtio.c
+@@ -0,0 +1,643 @@
++/*
++ * SWEET virtual machine ("sweet-virt"): the same kernel and iOS 16 userland
++ * inside QEMU's virt board, e.g. in the ios-sweet Android app on any arm64
++ * phone (Samsung Exynos / Snapdragon, ...).
++ *
++ * The phone drivers (UFS, Goodix touch, PMIC keys, DWC3 USB) have no
++ * hardware there. Instead tools/mkadt.py --virt adds a /sweet-virtio node:
++ *
++ *   reg          <base stride count>  virtio-mmio transports (u64 each)
++ *   uart         <base>               PL011 for the console mirror (u64)
++ *   psci-hvc                          PSCI through hvc, not smc (SweetCPU.cpp)
++ *
++ * and this file drives, all polled (no interrupt routing needed):
++ *
++ *   virtio-blk      the iOS root disk: the whole disk is the HFS+ volume,
++ *                   served by sweet_ufs.c as ufsroot0 like on the phone.
++ *   virtio-input    tablet (absolute pointer = one finger on the 1080x2400
++ *                   panel) and keyboard (power, volume, Home keys), fed to
++ *                   the HID services in SweetHID.cpp.
++ *   PL011           every console byte (the ring in sweet_ufs.c) is copied
++ *                   to the UART, i.e. to QEMU's -serial file.
++ *
++ * Only modern (version 2) virtio-mmio transports are used: start QEMU with
++ * -global virtio-mmio.force-legacy=false. QEMU's virtio is cache coherent.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/locks.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern void sweet_hid_key(int key, int down);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
++
++int sweet_virt_present(void);
++int sweet_vblk_init(uint64_t *sectors, bool *can_flush);
++int sweet_vblk_io(uint64_t sector, uint64_t pa, uint32_t len, bool write);
++int sweet_vblk_flush(void);
++void sweet_virt_start(void);
++
++#define VIO_MAGIC               0x000
++#define VIO_VERSION             0x004
++#define VIO_DEVICE_ID           0x008
++#define VIO_DEVICE_FEATURES     0x010
++#define VIO_DEVICE_FEATURES_SEL 0x014
++#define VIO_DRIVER_FEATURES     0x020
++#define VIO_DRIVER_FEATURES_SEL 0x024
++#define VIO_QUEUE_SEL           0x030
++#define VIO_QUEUE_NUM_MAX       0x034
++#define VIO_QUEUE_NUM           0x038
++#define VIO_QUEUE_READY         0x044
++#define VIO_QUEUE_NOTIFY        0x050
++#define VIO_INTERRUPT_STATUS    0x060
++#define VIO_INTERRUPT_ACK       0x064
++#define VIO_STATUS              0x070
++#define VIO_QUEUE_DESC_LO       0x080
++#define VIO_QUEUE_DESC_HI       0x084
++#define VIO_QUEUE_AVAIL_LO      0x090
++#define VIO_QUEUE_AVAIL_HI      0x094
++#define VIO_QUEUE_USED_LO       0x0a0
++#define VIO_QUEUE_USED_HI       0x0a4
++#define VIO_CONFIG              0x100
++
++#define ST_ACKNOWLEDGE          1u
++#define ST_DRIVER               2u
++#define ST_DRIVER_OK            4u
++#define ST_FEATURES_OK          8u
++#define ST_FAILED               128u
++
++#define VIRTIO_ID_BLOCK         2
++#define VIRTIO_ID_INPUT         18
++#define VIRTIO_F_VERSION_1_HI   (1u << 0)       /* feature bit 32 */
++#define VIRTIO_BLK_F_FLUSH      (1u << 9)
++
++#define VRING_DESC_F_NEXT       1
++#define VRING_DESC_F_WRITE      2
++
++#define VIO_MAX_DEVICES         64
++#define VIO_TIMEOUT_NS          (30ull * NSEC_PER_SEC)
++
++struct vdesc {
++	uint64_t addr;
++	uint32_t len;
++	uint16_t flags;
++	uint16_t next;
++};
++
++/*
++ * One virtqueue in one page: descriptors at 0, available ring at 0x400,
++ * used ring at 0x800 (QSIZE <= 64).
++ */
++#define QSIZE                   64
++#define Q_AVAIL                 0x400
++#define Q_USED                  0x800
++#define Q_BYTES                 0x1000
++
++struct vq {
++	vm_offset_t va;
++	uint64_t pa;
++	uint16_t num;
++	uint16_t last_used;
++	uint16_t avail_idx;
++};
++
++static struct {
++	bool probed, present;
++	uint64_t base, stride;
++	uint32_t count;
++	uint64_t uart_pa;
++	vm_offset_t uart;
++	vm_offset_t map[VIO_MAX_DEVICES];
++} vt;
++
++static inline uint32_t
++vio_rd(vm_offset_t r, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(r + off);
++	__builtin_arm_dmb(0xf);
++	return v;
++}
++
++static inline void
++vio_wr(vm_offset_t r, uint32_t off, uint32_t v)
++{
++	__builtin_arm_dmb(0xf);
++	*(volatile uint32_t *)(r + off) = v;
++}
++
++static inline volatile uint16_t *
++vq_avail(struct vq *q)
++{
++	return (volatile uint16_t *)(q->va + Q_AVAIL);         /* flags, idx, ring[] */
++}
++
++static inline volatile uint16_t *
++vq_used_idx(struct vq *q)
++{
++	return (volatile uint16_t *)(q->va + Q_USED + 2);
++}
++
++static inline volatile uint32_t *
++vq_used_elem(struct vq *q, uint16_t slot)
++{
++	return (volatile uint32_t *)(q->va + Q_USED + 4 + 8u * (slot % q->num));  /* id, len */
++}
++
++static inline struct vdesc *
++vq_desc(struct vq *q, uint16_t i)
++{
++	return (struct vdesc *)(q->va) + i;
++}
++
++static void
++vq_push(struct vq *q, uint16_t head)
++{
++	volatile uint16_t *avail = vq_avail(q);
++	avail[2 + (q->avail_idx % q->num)] = head;
++	__builtin_arm_dmb(0xf);
++	q->avail_idx++;
++	avail[1] = q->avail_idx;
++	__builtin_arm_dmb(0xf);
++}
++
++static void
++vio_sleep_ms(unsigned ms, event_t chan)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static bool
++vio_alloc(vm_size_t size, vm_offset_t *va, uint64_t *pa)
++{
++	if (kmem_alloc_contig(kernel_map, va, size, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return false;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)*va);
++	if (!pn) {
++		return false;
++	}
++	*pa = ptoa_64(pn);
++	return true;
++}
++
++int
++sweet_virt_present(void)
++{
++	DTEntry node;
++	uint64_t const *reg = NULL, *uart = NULL;
++	unsigned int size = 0;
++
++	if (vt.probed) {
++		return vt.present;
++	}
++	vt.probed = true;
++	if (SecureDTLookupEntry(NULL, "/sweet-virtio", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 3 * sizeof(uint64_t)) {
++		return 0;
++	}
++	vt.base = reg[0];
++	vt.stride = reg[1];
++	vt.count = (uint32_t)MIN(reg[2], (uint64_t)VIO_MAX_DEVICES);
++	if (SecureDTGetProperty(node, "uart", (void const **)&uart, &size) == kSuccess &&
++	    size >= sizeof(uint64_t)) {
++		vt.uart_pa = uart[0];
++	}
++	vt.present = (vt.stride >= 0x200 && vt.count > 0);
++	return vt.present;
++}
++
++/*
++ * Reset the transport, negotiate VERSION_1 plus the features in want_lo
++ * that the device offers, and leave it in FEATURES_OK. Returns the
++ * accepted low feature word, or -1.
++ */
++static int64_t
++vio_negotiate(vm_offset_t r, uint32_t want_lo)
++{
++	vio_wr(r, VIO_STATUS, 0);
++	while (vio_rd(r, VIO_STATUS) != 0) {
++	}
++	vio_wr(r, VIO_STATUS, ST_ACKNOWLEDGE);
++	vio_wr(r, VIO_STATUS, ST_ACKNOWLEDGE | ST_DRIVER);
++	vio_wr(r, VIO_DEVICE_FEATURES_SEL, 1);
++	uint32_t hi = vio_rd(r, VIO_DEVICE_FEATURES);
++	vio_wr(r, VIO_DEVICE_FEATURES_SEL, 0);
++	uint32_t lo = vio_rd(r, VIO_DEVICE_FEATURES) & want_lo;
++	if (!(hi & VIRTIO_F_VERSION_1_HI)) {
++		vio_wr(r, VIO_STATUS, ST_FAILED);
++		return -1;
++	}
++	vio_wr(r, VIO_DRIVER_FEATURES_SEL, 1);
++	vio_wr(r, VIO_DRIVER_FEATURES, VIRTIO_F_VERSION_1_HI);
++	vio_wr(r, VIO_DRIVER_FEATURES_SEL, 0);
++	vio_wr(r, VIO_DRIVER_FEATURES, lo);
++	vio_wr(r, VIO_STATUS, ST_ACKNOWLEDGE | ST_DRIVER | ST_FEATURES_OK);
++	if (!(vio_rd(r, VIO_STATUS) & ST_FEATURES_OK)) {
++		vio_wr(r, VIO_STATUS, ST_FAILED);
++		return -1;
++	}
++	return lo;
++}
++
++static bool
++vio_queue(vm_offset_t r, uint32_t index, struct vq *q, uint16_t want)
++{
++	vio_wr(r, VIO_QUEUE_SEL, index);
++	uint32_t max = vio_rd(r, VIO_QUEUE_NUM_MAX);
++	if (max == 0 || vio_rd(r, VIO_QUEUE_READY)) {
++		return false;
++	}
++	if (!vio_alloc(Q_BYTES, &q->va, &q->pa)) {
++		return false;
++	}
++	q->num = (uint16_t)MIN(MIN((uint32_t)want, max), (uint32_t)QSIZE);
++	q->last_used = 0;
++	q->avail_idx = 0;
++	vio_wr(r, VIO_QUEUE_NUM, q->num);
++	vio_wr(r, VIO_QUEUE_DESC_LO, (uint32_t)q->pa);
++	vio_wr(r, VIO_QUEUE_DESC_HI, (uint32_t)(q->pa >> 32));
++	vio_wr(r, VIO_QUEUE_AVAIL_LO, (uint32_t)(q->pa + Q_AVAIL));
++	vio_wr(r, VIO_QUEUE_AVAIL_HI, (uint32_t)((q->pa + Q_AVAIL) >> 32));
++	vio_wr(r, VIO_QUEUE_USED_LO, (uint32_t)(q->pa + Q_USED));
++	vio_wr(r, VIO_QUEUE_USED_HI, (uint32_t)((q->pa + Q_USED) >> 32));
++	vio_wr(r, VIO_QUEUE_READY, 1);
++	return true;
++}
++
++/* Map transport i if it holds a modern device of the given type. */
++static vm_offset_t
++vio_find(uint32_t i, uint32_t device_id)
++{
++	if (!vt.map[i]) {
++		vt.map[i] = ml_io_map(vt.base + (uint64_t)i * vt.stride, 0x200);
++	}
++	vm_offset_t r = vt.map[i];
++	if (!r) {
++		return 0;
++	}
++	if (vio_rd(r, VIO_MAGIC) != 0x74726976 || vio_rd(r, VIO_DEVICE_ID) != device_id) {
++		return 0;
++	}
++	if (vio_rd(r, VIO_VERSION) != 2) {
++		printf("SWEET VIRT: transport %u is legacy virtio (use -global virtio-mmio.force-legacy=false)\n", i);
++		return 0;
++	}
++	return r;
++}
++
++/*
++ * virtio-blk: one request at a time (the caller, sweet_ufs.c, holds its
++ * mutex), header + data + status in three descriptors.
++ */
++static struct {
++	vm_offset_t regs;
++	struct vq q;
++	vm_offset_t req;        /* 16-byte header at 0, status byte at 16 */
++	uint64_t req_pa;
++	bool flush;
++} vb;
++
++int
++sweet_vblk_init(uint64_t *sectors, bool *can_flush)
++{
++	if (!sweet_virt_present()) {
++		return ENXIO;
++	}
++	for (uint32_t i = 0; i < vt.count && !vb.regs; i++) {
++		vm_offset_t r = vio_find(i, VIRTIO_ID_BLOCK);
++		if (!r) {
++			continue;
++		}
++		int64_t f = vio_negotiate(r, VIRTIO_BLK_F_FLUSH);
++		if (f < 0 || !vio_queue(r, 0, &vb.q, 8) || !vio_alloc(PAGE_SIZE, &vb.req, &vb.req_pa)) {
++			printf("SWEET VIRT: virtio-blk on transport %u: setup failed\n", i);
++			vio_wr(r, VIO_STATUS, ST_FAILED);
++			continue;
++		}
++		vio_wr(r, VIO_STATUS, ST_ACKNOWLEDGE | ST_DRIVER | ST_FEATURES_OK | ST_DRIVER_OK);
++		vb.flush = (f & VIRTIO_BLK_F_FLUSH) != 0;
++		vb.regs = r;
++		uint32_t lo = vio_rd(r, VIO_CONFIG), hi = vio_rd(r, VIO_CONFIG + 4);
++		*sectors = ((uint64_t)hi << 32) | lo;
++		*can_flush = vb.flush;
++		printf("SWEET VIRT: virtio-blk on transport %u: %llu MiB, queue %u%s\n",
++		    i, *sectors >> 11, vb.q.num, vb.flush ? ", flush" : "");
++	}
++	return vb.regs ? 0 : ENXIO;
++}
++
++static int
++vblk_request(uint32_t type, uint64_t sector, uint64_t pa, uint32_t len, bool to_device)
++{
++	struct vq *q = &vb.q;
++	uint32_t *hdr = (uint32_t *)vb.req;
++	volatile uint8_t *status = (volatile uint8_t *)(vb.req + 16);
++
++	hdr[0] = type;
++	hdr[1] = 0;
++	*(uint64_t *)(vb.req + 8) = sector;
++	*status = 0xff;
++
++	struct vdesc *d0 = vq_desc(q, 0), *d1 = vq_desc(q, 1), *d2 = vq_desc(q, 2);
++	d0->addr = vb.req_pa;
++	d0->len = 16;
++	d0->flags = VRING_DESC_F_NEXT;
++	if (len) {
++		d0->next = 1;
++		d1->addr = pa;
++		d1->len = len;
++		d1->flags = VRING_DESC_F_NEXT | (to_device ? 0 : VRING_DESC_F_WRITE);
++		d1->next = 2;
++	} else {
++		d0->next = 2;
++	}
++	d2->addr = vb.req_pa + 16;
++	d2->len = 1;
++	d2->flags = VRING_DESC_F_WRITE;
++	d2->next = 0;
++
++	vq_push(q, 0);
++	vio_wr(vb.regs, VIO_QUEUE_NOTIFY, 0);
++
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(VIO_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	/* Spin briefly, then let delay() block (it does when preemption allows). */
++	for (uint32_t spins = 0; *vq_used_idx(q) == q->last_used; spins++) {
++		if (mach_absolute_time() > deadline) {
++			printf("SWEET VIRT: virtio-blk request %u timed out\n", type);
++			return ETIMEDOUT;
++		}
++		delay(spins < 40 ? 5 : 200);
++	}
++	__builtin_arm_dmb(0xf);
++	q->last_used++;
++	vio_wr(vb.regs, VIO_INTERRUPT_ACK, vio_rd(vb.regs, VIO_INTERRUPT_STATUS));
++	if (*status != 0) {
++		printf("SWEET VIRT: virtio-blk request %u at sector %llu failed: status %u\n",
++		    type, sector, *status);
++		return EIO;
++	}
++	return 0;
++}
++
++int
++sweet_vblk_io(uint64_t sector, uint64_t pa, uint32_t len, bool write)
++{
++	if (!vb.regs) {
++		return ENXIO;
++	}
++	return vblk_request(write ? 1 : 0, sector, pa, len, write);
++}
++
++int
++sweet_vblk_flush(void)
++{
++	if (!vb.regs || !vb.flush) {
++		return 0;
++	}
++	return vblk_request(4, 0, 0, 0, false);
++}
++
++/*
++ * virtio-input: every input device QEMU offers (virtio-tablet-device,
++ * virtio-keyboard-device, ...) gets its event queue filled with 8-byte
++ * buffers; one thread polls them all every 5 ms.
++ */
++#define EV_SYN          0
++#define EV_KEY          1
++#define EV_ABS          3
++#define ABS_X           0
++#define ABS_Y           1
++#define KEY_HOME        102
++#define KEY_VOLUMEDOWN  114
++#define KEY_VOLUMEUP    115
++#define KEY_POWER       116
++#define KEY_HOMEPAGE    172
++#define BTN_LEFT        0x110
++#define BTN_TOUCH       0x14a
++
++#define VI_MAX          4
++#define VI_CFG_SELECT   (VIO_CONFIG + 0)
++#define VI_CFG_SUBSEL   (VIO_CONFIG + 1)
++#define VI_CFG_SIZE     (VIO_CONFIG + 2)
++#define VI_CFG_DATA     (VIO_CONFIG + 8)
++#define VIRTIO_INPUT_CFG_ABS_INFO 0x12
++
++struct vin_event {
++	uint16_t type, code;
++	uint32_t value;
++};
++
++static struct vin {
++	vm_offset_t regs;
++	struct vq q;
++	vm_offset_t buf;
++	uint64_t buf_pa;
++	uint32_t max_x, max_y;
++	uint32_t x, y;
++	bool down, sent_down;
++	bool moved;
++} vi[VI_MAX];
++static unsigned vi_count;
++static int vi_chan;
++
++static uint32_t
++vin_abs_max(vm_offset_t r, uint8_t axis)
++{
++	*(volatile uint8_t *)(r + VI_CFG_SELECT) = VIRTIO_INPUT_CFG_ABS_INFO;
++	*(volatile uint8_t *)(r + VI_CFG_SUBSEL) = axis;
++	__builtin_arm_dmb(0xf);
++	if (*(volatile uint8_t *)(r + VI_CFG_SIZE) < 8) {
++		return 0x7fff;
++	}
++	uint32_t max = *(volatile uint32_t *)(r + VI_CFG_DATA + 4);
++	return max ? max : 0x7fff;
++}
++
++static void
++vin_post(struct vin *v, uint16_t i)
++{
++	struct vdesc *d = vq_desc(&v->q, i);
++	d->addr = v->buf_pa + i * sizeof(struct vin_event);
++	d->len = sizeof(struct vin_event);
++	d->flags = VRING_DESC_F_WRITE;
++	d->next = 0;
++	vq_push(&v->q, i);
++}
++
++static void
++vin_event(struct vin *v, const struct vin_event *e)
++{
++	switch (e->type) {
++	case EV_ABS:
++		if (e->code == ABS_X) {
++			v->x = e->value;
++			v->moved = true;
++		} else if (e->code == ABS_Y) {
++			v->y = e->value;
++			v->moved = true;
++		}
++		break;
++	case EV_KEY:
++		switch (e->code) {
++		case BTN_LEFT:
++		case BTN_TOUCH:
++			v->down = e->value != 0;
++			break;
++		case KEY_POWER:
++			sweet_hid_key(0, e->value != 0);
++			break;
++		case KEY_VOLUMEUP:
++			sweet_hid_key(1, e->value != 0);
++			break;
++		case KEY_VOLUMEDOWN:
++			sweet_hid_key(2, e->value != 0);
++			break;
++		case KEY_HOME:
++		case KEY_HOMEPAGE:
++			sweet_hid_key(3, e->value != 0);
++			break;
++		}
++		break;
++	case EV_SYN:
++		/* Panel pixels, as the Goodix driver reports them. */
++		if (v->down || v->sent_down) {
++			int px = (int)(((uint64_t)MIN(v->x, v->max_x) * 1080) / ((uint64_t)v->max_x + 1));
++			int py = (int)(((uint64_t)MIN(v->y, v->max_y) * 2400) / ((uint64_t)v->max_y + 1));
++			if (v->down != v->sent_down || v->moved) {
++				sweet_hid_touch(0, v->down, px, py);
++			}
++			v->sent_down = v->down;
++		}
++		v->moved = false;
++		break;
++	}
++}
++
++static void
++vin_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	for (;;) {
++		vio_sleep_ms(5, (event_t)&vi_chan);
++		for (unsigned n = 0; n < vi_count; n++) {
++			struct vin *v = &vi[n];
++			bool posted = false;
++			while (*vq_used_idx(&v->q) != v->q.last_used) {
++				__builtin_arm_dmb(0xf);
++				uint16_t id = (uint16_t)vq_used_elem(&v->q, v->q.last_used)[0];
++				v->q.last_used++;
++				if (id < v->q.num) {
++					struct vin_event e = ((struct vin_event *)v->buf)[id];
++					vin_event(v, &e);
++					vin_post(v, id);
++					posted = true;
++				}
++			}
++			if (posted) {
++				vio_wr(v->regs, VIO_INTERRUPT_ACK, vio_rd(v->regs, VIO_INTERRUPT_STATUS));
++				vio_wr(v->regs, VIO_QUEUE_NOTIFY, 0);
++			}
++		}
++	}
++}
++
++static void
++vin_init(void)
++{
++	for (uint32_t i = 0; i < vt.count && vi_count < VI_MAX; i++) {
++		vm_offset_t r = vio_find(i, VIRTIO_ID_INPUT);
++		if (!r) {
++			continue;
++		}
++		struct vin *v = &vi[vi_count];
++		if (vio_negotiate(r, 0) < 0 || !vio_queue(r, 0, &v->q, QSIZE) ||
++		    !vio_alloc(PAGE_SIZE, &v->buf, &v->buf_pa)) {
++			printf("SWEET VIRT: virtio-input on transport %u: setup failed\n", i);
++			vio_wr(r, VIO_STATUS, ST_FAILED);
++			continue;
++		}
++		v->regs = r;
++		v->max_x = vin_abs_max(r, ABS_X);
++		v->max_y = vin_abs_max(r, ABS_Y);
++		vio_wr(r, VIO_STATUS, ST_ACKNOWLEDGE | ST_DRIVER | ST_FEATURES_OK | ST_DRIVER_OK);
++		for (uint16_t d = 0; d < v->q.num; d++) {
++			vin_post(v, d);
++		}
++		vio_wr(r, VIO_QUEUE_NOTIFY, 0);
++		printf("SWEET VIRT: virtio-input on transport %u (abs max %u x %u)\n",
++		    i, v->max_x, v->max_y);
++		vi_count++;
++	}
++}
++
++/*
++ * Console mirror: copy the console ring to the PL011 data register. QEMU's
++ * PL011 transmits immediately; a full FIFO is still honored.
++ */
++#define PL011_DR        0x00
++#define PL011_FR        0x18
++#define PL011_FR_TXFF   (1u << 5)
++static int uart_chan;
++
++static void
++uart_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	static char chunk[1024];
++	uint64_t pos = 0;      /* the whole ring: the boot log so far is included */
++	for (;;) {
++		uint32_t n;
++		while ((n = sweet_log_copy(&pos, chunk, sizeof(chunk))) > 0) {
++			for (uint32_t i = 0; i < n; i++) {
++				while (*(volatile uint32_t *)(vt.uart + PL011_FR) & PL011_FR_TXFF) {
++				}
++				*(volatile uint32_t *)(vt.uart + PL011_DR) = (uint8_t)chunk[i];
++			}
++		}
++		vio_sleep_ms(50, (event_t)&uart_chan);
++	}
++}
++
++/* After the root disk is up (sweet_ufs.c): input devices and the console mirror. */
++void
++sweet_virt_start(void)
++{
++	thread_t thread;
++	uint32_t on = 1;
++
++	if (!sweet_virt_present()) {
++		return;
++	}
++	PE_parse_boot_argn("sweetvirtuart", &on, sizeof(on));
++	if (on && vt.uart_pa && (vt.uart = ml_io_map(vt.uart_pa, 0x1000)) != 0 &&
++	    kernel_thread_start(uart_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++	vin_init();
++	if (vi_count && kernel_thread_start(vin_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++	printf("SWEET VIRT: %u input device(s), console on %s\n", vi_count,
++	    vt.uart ? "PL011" : "nothing");
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 2545cf9..0f8d7d0 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -17,6 +17,7 @@
+ #include <kern/thread.h>
+ #include <mach/mach_time.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ 
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+@@ -25,6 +26,25 @@ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+ static uint32_t sweet_cpus_registered;
+ 
++/*
++ * PSCI conduit: smc on the phone (TrustZone firmware), hvc in QEMU's virt
++ * board without EL2/EL3 (the /sweet-virtio node has psci-hvc, see
++ * bsd/dev/sweet_virtio.c).
++ */
++static bool
++sweet_psci_use_hvc(void)
++{
++	static int cached = -1;
++	if (cached < 0) {
++		DTEntry entry;
++		void const *prop = NULL;
++		unsigned int size = 0;
++		cached = SecureDTLookupEntry(NULL, "/sweet-virtio", &entry) == kSuccess &&
++		    SecureDTGetProperty(entry, "psci-hvc", &prop, &size) == kSuccess;
++	}
++	return cached != 0;
++}
++
+ /* SMCCC 1.0: x0 is the signed PSCI result; do not assume x1-x17 survive. */
+ static int32_t
+ sweet_psci_cpu_on(uint64_t target, uint64_t entry, uint64_t context)
+@@ -33,9 +53,15 @@ sweet_psci_cpu_on(uint64_t target, uint64_t entry, uint64_t context)
+ 	register uint64_t x1 __asm__("x1") = target;
+ 	register uint64_t x2 __asm__("x2") = entry;
+ 	register uint64_t x3 __asm__("x3") = context;
+-	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
+-	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+-	    "x14", "x15", "x16", "x17", "cc", "memory");
++	if (sweet_psci_use_hvc()) {
++		__asm__ volatile("hvc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
++		    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++		    "x14", "x15", "x16", "x17", "cc", "memory");
++	} else {
++		__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
++		    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++		    "x14", "x15", "x16", "x17", "cc", "memory");
++	}
+ 	return (int32_t)x0;
+ }
+ 

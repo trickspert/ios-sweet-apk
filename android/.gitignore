@@ -6,4 +6,5 @@ app/src/main/jniLibs/
 app/src/main/assets/qemu/
 app/src/main/assets/boot/
 *.keystore
+!app/sweet16-dev.keystore
 .kotlin/

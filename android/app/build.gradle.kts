@@ -11,20 +11,29 @@ android {
         applicationId = "com.iossweet.sweet16"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Always higher than the previous build: minutes since 2026-01-01.
+        versionCode = ((System.currentTimeMillis() / 60000L) - 29_455_200L).toInt()
+        versionName = "0.2.0"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     signingConfigs {
-        // CI passes a keystore through the environment; otherwise the debug key signs.
-        val ks = System.getenv("SWEET16_KEYSTORE")
-        if (ks != null && file(ks).exists()) {
-            create("release") {
+        // One fixed key for every build (CI and local), so a new APK always installs
+        // over the old one and keeps the imported iOS disk. Each CI runner used to
+        // make its own random debug key, and updates then failed ("App not installed").
+        // This is a public development key, not a secret; SWEET16_KEYSTORE overrides it.
+        create("release") {
+            val ks = System.getenv("SWEET16_KEYSTORE")
+            if (ks != null && file(ks).exists()) {
                 storeFile = file(ks)
                 storePassword = System.getenv("SWEET16_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("SWEET16_KEY_ALIAS") ?: "sweet16"
                 keyPassword = System.getenv("SWEET16_KEY_PASSWORD") ?: System.getenv("SWEET16_KEYSTORE_PASSWORD")
+            } else {
+                storeFile = file("sweet16-dev.keystore")
+                storePassword = "sweet16"
+                keyAlias = "sweet16"
+                keyPassword = "sweet16"
             }
         }
     }
@@ -32,7 +41,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

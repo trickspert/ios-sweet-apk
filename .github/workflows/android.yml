@@ -96,3 +96,32 @@ jobs:
           name: Sweet16-apk
           path: out/
           if-no-files-found: error
+
+  # Every successful build of main is published as a GitHub Release with the APK
+  # (and the PC-side boot bundle). Same signing key every time, so updates install
+  # over the previous version.
+  release:
+    needs: apk
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Sweet16-apk
+          path: out
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: sweet16-build-${{ github.run_number }}
+          name: Sweet16 build ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: "true"
+          files: out/*
+          body: |
+            Sweet16: iOS 16 in a virtual machine on arm64 Android phones. Experimental.
+
+            Install `Sweet16-iOS16-arm64.apk`, then follow the README (build the iOS disk from your own
+            iPhone X 16.7.16 IPSW with Termux, Import, pick DT-d22ap.bin, Start). No Apple files are included.
+
+            Built from ${{ github.sha }} by run ${{ github.run_id }}.

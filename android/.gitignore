@@ -6,3 +6,4 @@ app/src/main/jniLibs/
 app/src/main/assets/qemu/
 app/src/main/assets/boot/
 *.keystore
+.kotlin/

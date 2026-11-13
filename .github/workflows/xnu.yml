@@ -36,9 +36,8 @@ on:
       - "xnu/patches/**"
       - ".github/workflows/xnu.yml"
 
-concurrency:
-  group: xnu-${{ github.ref }}
-  cancel-in-progress: true
+# No workflow-level concurrency: android.yml calls this workflow and has its own
+# group; a second group here cancelled the called kernel job at start.
 
 env:
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build

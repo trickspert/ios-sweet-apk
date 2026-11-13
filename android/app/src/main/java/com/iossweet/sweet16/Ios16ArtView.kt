@@ -77,7 +77,7 @@ class Ios16ArtView @JvmOverloads constructor(
             null, Shader.TileMode.CLAMP)
         numeralEdge.textSize = numeral.textSize
         numeralEdge.strokeWidth = 1.6f * density
-        numeralEdge.color = Color.argb(150, 255, 255, 255)
+        numeralEdge.color = Color.argb(70, 255, 255, 255)
         label.textSize = fw * 0.17f
         tagline.textSize = fw * 0.052f
     }

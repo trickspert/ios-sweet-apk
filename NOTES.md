@@ -2,6 +2,44 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> UPDATE 2026-11-13: Sweet16 Android app (sweet-virt machine) - read first <<<
+
+The user asked for an APK version that runs on Samsung phones. An app cannot boot XNU on bare metal, so the
+APK runs the same kernel in QEMU (TCG) on a fixed virtual machine ("sweet-virt"). See `android/README.md`.
+Branch `claude/ios-apk-samsung-conversion-aqhpqn`.
+
+**Done (observed on the PC, x86_64, QEMU 8.2):**
+- `tools/virt-stub` (ramfb via fw_cfg DMA, then the kernel with x0 = boot_args): booted a synthetic stand-in
+  kernel through `tools/mkvirtbundle.py` + `tools/qemu-sweet-virt.sh` (the app's QEMU args). The stand-in checked
+  boot_args (Revision 2, v_width 560) and painted the fb; QMP screendump and the app's `RfbClient` (JVM test,
+  `SWEET16_VNC_SOCKET=... gradle testDebugUnitTest`) read 560x1218 with the expected pixels.
+- QEMU's VNC server takes at most 2160 rows (`ui/vnc.h`, also in 11.1.3): 1080x2400 arrives as 1088x2048.
+  Hence the VM framebuffer is 560x1218 with kernel boot-arg `sweetfb_scale=2` (width multiple of 16: no VNC padding).
+- `tools/mkadt.py --virt [--ram-mb N]`: phone/--qemu/--highmem ADTs verified byte-identical to before (fixed seed).
+- `android/`: app builds (`gradle assembleRelease`, AGP 8.11.1, Kotlin 2.0.21, SDK 35, minSdk 29), unit tests
+  pass (sparse/raw disk decoders, RfbClient). Launcher rendered with Paparazzi: `android/docs/*.png`.
+- `android/tools/fetch-termux-qemu.py`: Termux qemu-system-aarch64-headless 1:11.1.3 + 69 libs -> jniLibs
+  (`libqemu.so` is the executable; sonames rewritten with patchelf, RUNPATH removed), 67 MiB, keymaps in assets.
+
+**NOT verified (guesses until tested):**
+- **Patch 0082 has never been compiled.** It applies cleanly after 0081 (`git apply --check` on xnu-8796.141.3 with
+  0001-0081). It needs the xnu workflow (macOS runner). Files: new `bsd/dev/sweet_virtio.c`; `sweet_ufs.c` (virtio backend,
+  whole disk, no persistent log); `SweetCPU.cpp` (hvc PSCI if `/sweet-virtio` has `psci-hvc`); `SweetFramebuffer.cpp`
+  (`presentScaled`, `sweetfb_scale`).
+- Nothing has run on an Android phone yet: running `libqemu.so` from nativeLibraryDir with LD_LIBRARY_PATH,
+  Termux's QEMU outside Termux, `-vnc unix:`, the foreground service on One UI, the phantom process killer.
+- iOS userland under TCG: speed unknown (guess: tens of minutes to SpringBoard), RAM 4 GB guest (kernel gets
+  0xb0000000..0x140000000).
+- CI-built bundles have no `/product` node (Apple's D22AP device tree is not in git); `tools/mksweet16.sh` adds it
+  when `research/ipsw-x/d22ap.adt` exists, and the app imports such a bundle zip.
+
+**Blocked here:** pushing to GitHub failed (HTTP 403, the Claude GitHub App has no write access to
+trickspert/ios-sweet-apk), so no CI run yet. The commits are local in this session until access is fixed.
+
+**Next:** push; run `android.yml` (it calls `xnu.yml` via workflow_call, then builds the bundle + APK; artifact
+`Sweet16-apk`). Fix compile errors in 0082 (`tools/xnu-cc.py` with the buildtree artifact). Then boot the bundle
+with a real iOS root on the PC (`tools/qemu-sweet-virt.sh`) before testing on a phone.
+
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
 
 **STATE at end of 2026-10-18 (evening):**

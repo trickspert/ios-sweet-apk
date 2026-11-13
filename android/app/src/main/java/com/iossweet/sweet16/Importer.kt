@@ -75,7 +75,7 @@ class Importer(private val context: Context, private val store: Store) {
             }
             val magic = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN).int
             RandomAccessFile(tmp, "rw").use { out ->
-                if (magic == SPARSE_MAGIC) writeSparse(stream, out) else writeRaw(stream, out)
+                if (magic == SPARSE_MAGIC) DiskImage.writeSparse(stream, out, cancelled) else DiskImage.writeRaw(stream, out, cancelled)
             }
             checkHfs(tmp)
             store.disk.delete()
@@ -83,94 +83,6 @@ class Importer(private val context: Context, private val store: Store) {
         } finally {
             tmp.delete()
             source.close()
-        }
-    }
-
-    private fun writeRaw(input: InputStream, out: RandomAccessFile) {
-        val buf = ByteArray(1 shl 20)
-        var pos = 0L
-        while (true) {
-            checkCancel()
-            val n = readFully(input, buf)
-            if (n <= 0) break
-            if (!isZero(buf, n)) {
-                out.seek(pos)
-                out.write(buf, 0, n)
-            }
-            pos += n
-            if (n < buf.size) break
-        }
-        out.setLength(pos)
-    }
-
-    /** Android sparse image (system/core/libsparse/sparse_format.h). */
-    private fun writeSparse(input: InputStream, out: RandomAccessFile) {
-        val d = DataInputStream(input)
-        val hdr = le(d, 28)
-        hdr.int // magic
-        val major = hdr.short.toInt()
-        hdr.short // minor
-        val fileHdrSz = hdr.short.toInt() and 0xffff
-        val chunkHdrSz = hdr.short.toInt() and 0xffff
-        val blkSz = hdr.int.toLong()
-        val totalBlks = hdr.int.toLong() and 0xffffffffL
-        val totalChunks = hdr.int.toLong() and 0xffffffffL
-        if (major != 1 || fileHdrSz < 28 || chunkHdrSz < 12 || blkSz <= 0 || blkSz % 4 != 0L) {
-            throw IOException("unsupported sparse image")
-        }
-        d.skipBytes(fileHdrSz - 28)
-        out.setLength(totalBlks * blkSz)
-        val buf = ByteArray(1 shl 20)
-        var blk = 0L
-        for (c in 0 until totalChunks) {
-            checkCancel()
-            val ch = le(d, 12)
-            val type = ch.short.toInt() and 0xffff
-            ch.short
-            val chunkBlks = ch.int.toLong() and 0xffffffffL
-            val totalSz = ch.int.toLong() and 0xffffffffL
-            d.skipBytes(chunkHdrSz - 12)
-            val bytes = chunkBlks * blkSz
-            when (type) {
-                0xCAC1 -> { // raw
-                    var left = bytes
-                    var pos = blk * blkSz
-                    while (left > 0) {
-                        checkCancel()
-                        val n = minOf(left, buf.size.toLong()).toInt()
-                        d.readFully(buf, 0, n)
-                        if (!isZero(buf, n)) {
-                            out.seek(pos)
-                            out.write(buf, 0, n)
-                        }
-                        pos += n
-                        left -= n
-                    }
-                }
-                0xCAC2 -> { // fill
-                    val pattern = ByteArray(4)
-                    d.readFully(pattern)
-                    if (!isZero(pattern, 4)) {
-                        for (i in buf.indices) buf[i] = pattern[i and 3]
-                        var left = bytes
-                        var pos = blk * blkSz
-                        while (left > 0) {
-                            val n = minOf(left, buf.size.toLong()).toInt()
-                            out.seek(pos)
-                            out.write(buf, 0, n)
-                            pos += n
-                            left -= n
-                        }
-                    }
-                }
-                0xCAC3 -> {} // don't care
-                0xCAC4 -> d.skipBytes(4) // crc32
-                else -> throw IOException("bad sparse chunk type 0x%x".format(type))
-            }
-            if (type != 0xCAC1 && type != 0xCAC2 && type != 0xCAC4 && totalSz != chunkHdrSz.toLong()) {
-                throw IOException("bad sparse chunk size")
-            }
-            blk += chunkBlks
         }
     }
 
@@ -248,7 +160,7 @@ class Importer(private val context: Context, private val store: Store) {
             return n
         }
 
-        private fun le(d: DataInputStream, n: Int): ByteBuffer {
+        fun le(d: DataInputStream, n: Int): ByteBuffer {
             val b = ByteArray(n)
             try {
                 d.readFully(b)
@@ -258,8 +170,11 @@ class Importer(private val context: Context, private val store: Store) {
             return ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
         }
 
+        /** True if b[0, n) is all zero (8 bytes at a time: a 16 GB image is mostly zeros). */
         fun isZero(b: ByteArray, n: Int): Boolean {
-            for (i in 0 until n) if (b[i].toInt() != 0) return false
+            val longs = ByteBuffer.wrap(b, 0, n - n % 8).asLongBuffer()
+            while (longs.hasRemaining()) if (longs.get() != 0L) return false
+            for (i in n - n % 8 until n) if (b[i].toInt() != 0) return false
             return true
         }
     }

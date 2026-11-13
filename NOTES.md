@@ -2,6 +2,16 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-13 ~15:45 UTC: second S25 boot (kernel log off) -> Apple logo, then panic <<<
+- With "Show the kernel log" off: Apple logo ~4+ min, then black with fbcon lines from identityservicesd
+  (`SK[n]: __nexus_register ... nxprov_create: 1`, Skywalk retries, no network: harmless), then
+  `panic(cpu 3 ...): Ticket spinlock[...] timeout after 52286220 ticks; ... timeout: 3000000 @lock_ticket.c:386`
+  (0.84 s held vs 48 ms default at 62.5 MHz): a vCPU descheduled by Android while holding a spinlock.
+- FIX (app, no kernel rebuild): Launch.kt always appends `slto_us=10000000 tlto_us=10000000` (xnu-8796
+  ml_init_lock_timeout boot-args; spin and ticket lock panic timeouts 10 s).
+- Console screen: re-set the log text only when the file changes (it reset the scroll every 0.7 s), follow mode
+  only at the bottom, Copy log (last 60 KB to the clipboard) and Bottom buttons.
+
 ### >>> 2026-11-13 ~11:10 UTC: iOS 16 USERLAND + APPLE LOGO ON A SAMSUNG GALAXY S25 ULTRA (Sweet16) <<<
 User's S25 Ultra (Snapdragon 8 Elite, One UI, KernelSU present but unused), Sweet16 = local fix139 APK (unmodified
 Termux QEMU, CI #6 kernel), 4 cores, 4 GB. rootfs.img built ON THE PHONE by tools/termux/mkiosroot-termux.sh from

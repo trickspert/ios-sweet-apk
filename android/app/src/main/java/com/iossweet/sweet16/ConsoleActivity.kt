@@ -41,6 +41,9 @@ class ConsoleActivity : Activity() {
     @Volatile private var serialOut: OutputStream? = null
     @Volatile private var open = false
     private var view = View.CONSOLE
+    /** Follow new output only while the view is at the bottom; reading older lines stops it. */
+    private var follow = true
+    private var shownKey = ""
 
     private enum class View { CONSOLE, LAUNCH, QEMU }
     private lateinit var state: TextView
@@ -65,6 +68,7 @@ class ConsoleActivity : Activity() {
         }
         scroll = ScrollView(this).apply {
             setBackgroundColor(Color.BLACK)
+            setOnScrollChangeListener { v, _, _, _, _ -> follow = !v.canScrollVertically(1) }
             addView(HorizontalScrollView(this@ConsoleActivity).apply { addView(text) })
         }
         input = EditText(this).apply {
@@ -82,11 +86,13 @@ class ConsoleActivity : Activity() {
             text = label; isAllCaps = false; textSize = 13f; setOnClickListener { action() }
         }
         val bar = LinearLayout(this).apply {
-            addView(btn("Console") { view = View.CONSOLE; refresh() })
-            addView(btn("Launch log") { view = View.LAUNCH; refresh() })
-            addView(btn("QEMU log") { view = View.QEMU; refresh() })
+            addView(btn("Console") { view = View.CONSOLE; follow = true; refresh() })
+            addView(btn("Launch log") { view = View.LAUNCH; follow = true; refresh() })
+            addView(btn("QEMU log") { view = View.QEMU; follow = true; refresh() })
             addView(btn("CPU regs") { cpuRegisters() })
             addView(btn("Boot details") { bootDetails() })
+            addView(btn("Copy log") { copyLog() })
+            addView(btn("Bottom") { follow = true; scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) } })
         }
         val inputRow = LinearLayout(this).apply {
             addView(input, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -162,15 +168,35 @@ class ConsoleActivity : Activity() {
 
     private fun refresh() {
         io.execute { if (serial == null) connectSerial() }
-        val atEnd = !scroll.canScrollVertically(1)
         state.text = "VM: ${VmState.phase.name.lowercase()}" + (if (VmState.message.isNotEmpty()) " — " + VmState.message.take(300) else "")
-        text.text = when (view) {
-            View.LAUNCH -> "── launch log (${store.launchLog.name}) ──\n" + tail(store.launchLog, 64 * 1024)
-            View.CONSOLE -> "── kernel console (PL011, ${store.consoleLog.name}) ──\n" + tail(store.consoleLog, 384 * 1024)
-            View.QEMU -> "── QEMU output (${store.qemuLog.name}) ──\n" + tail(store.qemuLog, 32 * 1024) +
-                "\n── QEMU -d log (${store.qemuDebugLog.name}, Developer boot option) ──\n" + tail(store.qemuDebugLog, 64 * 1024)
+        // Re-set the (large) text only when the file changed: resetting it every
+        // tick moved the reader back to the top.
+        val files = when (view) {
+            View.LAUNCH -> listOf(store.launchLog)
+            View.CONSOLE -> listOf(store.consoleLog)
+            View.QEMU -> listOf(store.qemuLog, store.qemuDebugLog)
         }
-        if (atEnd) scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+        val key = view.name + files.joinToString { "${it.length()}:${it.lastModified()}" }
+        if (key == shownKey) return
+        shownKey = key
+        val y = scroll.scrollY
+        text.text = currentText()
+        if (follow) scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) } else scroll.post { scroll.scrollTo(0, y) }
+    }
+
+    private fun currentText(): String = when (view) {
+        View.LAUNCH -> "── launch log (${store.launchLog.name}) ──\n" + tail(store.launchLog, 64 * 1024)
+        View.CONSOLE -> "── kernel console (PL011, ${store.consoleLog.name}) ──\n" + tail(store.consoleLog, 384 * 1024)
+        View.QEMU -> "── QEMU output (${store.qemuLog.name}) ──\n" + tail(store.qemuLog, 32 * 1024) +
+            "\n── QEMU -d log (${store.qemuDebugLog.name}, Developer boot option) ──\n" + tail(store.qemuDebugLog, 64 * 1024)
+    }
+
+    /** The end of the shown log to the clipboard, to paste into a chat or bug report. */
+    private fun copyLog() {
+        val t = currentText()
+        val last = if (t.length > 60_000) t.substring(t.length - 60_000) else t
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Sweet16 log", last))
+        android.widget.Toast.makeText(this, "Copied the last ${last.length / 1000} KB of the log", android.widget.Toast.LENGTH_SHORT).show()
     }
 
     /** QMP `info registers` from the live QEMU: where the guest CPUs actually are. */

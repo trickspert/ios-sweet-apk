@@ -107,11 +107,14 @@ class VmService : Service() {
             log.line("nativeLibraryDir: ${libDir.path} (${libDir.list()?.size ?: -1} files)")
             log.line("libqemu.so: exists=${qemu.isFile} size=${qemu.length()} canExecute=${qemu.canExecute()}")
             if (!qemu.isFile) throw IllegalStateException("QEMU is not in this APK (${qemu.path}); is extractNativeLibs on?")
+            log.line("library name links: ${store.prepareQemuLibLinks()} in ${store.qemuLibLinks.path}; " +
+                "LD_LIBRARY_PATH=${store.qemuLibraryPath()}")
 
             // Pre-flight: does the binary load at all (dynamic linker, libraries)?
             VmState.set(VmState.Phase.STARTING, "Checking QEMU", profile)
             val pre = runCaptured(store, listOf(qemu.path, "--version"), 15_000)
-            log.line("pre-flight `libqemu.so --version`: exit=${pre.first}\n" + pre.second.trim().prependIndent("    "))
+            log.line("pre-flight `libqemu.so --version`: exit=${pre.first}${signalName(pre.first)}\n" +
+                pre.second.trim().prependIndent("    "))
             if (pre.first != 0) throw IllegalStateException("QEMU does not start on this phone (exit ${pre.first}):\n" + pre.second.trim())
 
             VmState.set(VmState.Phase.STARTING, "Building the boot image", profile)
@@ -174,9 +177,15 @@ class VmService : Service() {
         }
     }
 
+    /** exit 128+N = killed by signal N (139 = SIGSEGV). */
+    private fun signalName(code: Int): String = when (code) {
+        134 -> " (SIGABRT)"; 135 -> " (SIGBUS)"; 137 -> " (SIGKILL)"; 139 -> " (SIGSEGV)"; 159 -> " (SIGSYS: seccomp)"
+        else -> if (code > 128) " (signal ${code - 128})" else ""
+    }
+
     private fun env(pb: ProcessBuilder, store: Store) {
         pb.environment().apply {
-            put("LD_LIBRARY_PATH", store.nativeLibDir())
+            put("LD_LIBRARY_PATH", store.qemuLibraryPath())
             put("TMPDIR", cacheDir.path)
             put("HOME", filesDir.path)
         }

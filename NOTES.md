@@ -2,6 +2,23 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-13 03:40 UTC: phone exit 139 root-caused + fixed; SMP verified <<<
+- User's Samsung (CI APK #6, new Launch log): pre-flight `libqemu.so --version` exit 139 (SIGSEGV), nothing printed.
+- ROOT CAUSE (reproduced here): fetch-termux-qemu.py ran patchelf (--set-soname/--replace-needed/--remove-rpath) and
+  llvm-strip. patchelf moved PT_INTERP/PT_NOTE into a new RW PT_LOAD with p_offset 0x1d84340 / p_vaddr 0x1dd0000 /
+  p_align 0x10000 (offset % align != vaddr % align): no loader can map it ("Error mapping file: Invalid argument" under
+  qemu-user; the phone kernel kills the exec with SIGSEGV).
+- Test bench: qemu-user + Android 15 arm64 system image (sys-img google_apis arm64-v8a-35_r09: GPT -> super -> system
+  ext4 (scratchpad lpextract.py) -> /system/lib64 + com.android.runtime.apex -> linker64/bionic) =
+  `qemu-aarch64 -L ROOT -E LD_LIBRARY_PATH=... libqemu.so`. Unmodified Termux binary: `QEMU emulator version 11.1.3`,
+  exit 0. Full machine with the app's args + CI ram.bin, -S: vnc/qmp/serial sockets up in 2 s, QMP query-status ok.
+- FIX: ELF files shipped byte for byte (no patchelf/strip; AGP keepDebugSymbols "**/*.so"); sonames that are not
+  APK-safe names ship as libX_so_N.so, assets/qemu/libmap.txt maps them, the app symlinks the sonames into
+  files/qemu-libs and sets LD_LIBRARY_PATH=files/qemu-libs:nativeLibraryDir. Verified in the test bench (exit 0) and
+  that all 70 files in the built APK are identical to Termux's.
+- SMP: CI #6 kernel (run 43357019797), cpus=4: CPU_ON rc=0 for cpu1-3, "came alive; SGI1 OK", sweet-sh `hw` ->
+  hw.ncpu 4. (Artifacts: also needs productionresultssa15.blob.core.windows.net in the environment.)
+
 ### >>> 2026-11-13 03:05 UTC: FIRST REAL XNU BOOT ON THE VIRT MACHINE (PC QEMU 8.2) <<<
 CI android #5 (run 43353401287, macos-15 + Xcode 16.0, patches 0082+0083) PASSED; kernel artifact has
 _sweet_vblk_init, _sweet_virt_start, presentScaled, vmapple_uart_init. Artifacts downloaded here (environment

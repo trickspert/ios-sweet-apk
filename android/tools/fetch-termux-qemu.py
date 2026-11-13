@@ -8,12 +8,19 @@ Android only lets an app execute files from its nativeLibraryDir, and the APK
 packager only ships files named lib*.so there. So:
 
   qemu-system-aarch64   -> OUT_JNILIBS_DIR/libqemu.so          (the executable)
-  every shared library  -> OUT_JNILIBS_DIR/lib<name>.so        (DT_NEEDED closure)
+  every shared library  -> OUT_JNILIBS_DIR/<package-safe name> (DT_NEEDED closure)
   share/qemu/keymaps    -> OUT_ASSETS_DIR/qemu/keymaps          (VNC needs en-us)
+  OUT_ASSETS_DIR/qemu/libmap.txt   "<soname> <file name in the APK>" per library
 
-Sonames and DT_NEEDED entries are rewritten to the new file names and the
-Termux RUNPATH is dropped (the app sets LD_LIBRARY_PATH). Libraries Android
-itself provides (bionic, liblog, libandroid, ...) are not copied.
+The ELF files are copied BYTE FOR BYTE. Do not patchelf or strip them:
+patchelf --set-soname/--replace-needed rewrote the program headers with a
+misaligned extra PT_LOAD (p_offset % p_align != p_vaddr % p_align), which the
+kernel refuses at exec: the APK's QEMU died with SIGSEGV (exit 139) on a
+Samsung phone. A soname that is not a valid APK name (libz.so.1,
+libglib-2.0.so.0) is shipped as e.g. libz_so_1.so; the app recreates the
+original names as symlinks (VmService.kt) and puts that directory first in
+LD_LIBRARY_PATH. Libraries Android itself provides (bionic, liblog,
+libandroid, ...) are not copied.
 
 QEMU is GPL-2.0; the package versions and source URLs are written to
 OUT_ASSETS_DIR/qemu/SOURCES.txt.
@@ -106,9 +113,11 @@ def needed(path):
 
 
 def apk_name(soname):
-    """libfoo.so.1.2 -> libfoo.so ; foo.so -> libfoo.so ; keeps names unique enough."""
-    base = re.sub(r'\.so(\.\d+)*$', '', soname)
-    base = re.sub(r'[^A-Za-z0-9_+-]', '_', base)
+    """A file name the APK packager keeps: lib<...>.so with no other dots.
+    libc++_shared.so stays; libz.so.1 -> libz_so_1.so; libglib-2.0.so.0 -> libglib-2_0_so_0.so."""
+    if re.fullmatch(r'lib[A-Za-z0-9_+-]+\.so', soname):
+        return soname
+    base = re.sub(r'[^A-Za-z0-9_+-]', '_', soname)
     if not base.startswith('lib'):
         base = 'lib' + base
     return base + '.so'
@@ -170,22 +179,19 @@ def main():
         print('note: not in Termux packages (expected from Android):', ', '.join(sorted(missing)), file=sys.stderr)
 
     rename = {so: apk_name(so) for so in want}
-    if len(set(rename.values())) != len(rename):
+    if len(set(rename.values())) != len(rename) or 'libqemu.so' in rename.values():
         raise SystemExit(f'library name collision after renaming: {rename}')
-    os.makedirs(a.jnilibs, exist_ok=True)
-    outputs = [(exe, os.path.join(a.jnilibs, 'libqemu.so'), None)]
-    outputs += [(src, os.path.join(a.jnilibs, rename[so]), rename[so]) for so, src in want.items()]
-    for src, dst, soname in outputs:
-        shutil.copyfile(src, dst)
+    shutil.rmtree(a.jnilibs, ignore_errors=True)
+    os.makedirs(a.jnilibs)
+    outputs = [(exe, os.path.join(a.jnilibs, 'libqemu.so'))]
+    outputs += [(src, os.path.join(a.jnilibs, rename[so])) for so, src in want.items()]
+    for src, dst in outputs:
+        shutil.copyfile(src, dst)   # unmodified ELF (see the module docstring)
         os.chmod(dst, 0o755)
-        args = ['patchelf', '--remove-rpath']
-        if soname:
-            args += ['--set-soname', soname]
-        for so in needed(dst):
-            if so in rename and rename[so] != so:
-                args += ['--replace-needed', so, rename[so]]
-        subprocess.run(args + [dst], check=True)
-        subprocess.run(['llvm-strip', '--strip-unneeded', dst], check=False)
+    os.makedirs(os.path.join(a.assets, 'qemu'), exist_ok=True)
+    with open(os.path.join(a.assets, 'qemu', 'libmap.txt'), 'w') as f:
+        for so in sorted(rename):
+            f.write(f'{so} {rename[so]}\n')
 
     km_src = os.path.join(stage, 'share/qemu/keymaps')
     km_dst = os.path.join(a.assets, 'qemu', 'keymaps')
@@ -196,9 +202,9 @@ def main():
             shutil.copyfile(os.path.join(km_src, k), os.path.join(km_dst, k))
     with open(os.path.join(a.assets, 'qemu', 'SOURCES.txt'), 'w') as f:
         f.write('QEMU and its libraries are prebuilt Termux packages (https://github.com/termux/termux-packages),\n'
-                'redistributed unmodified except for library file names (patchelf). Package versions:\n\n')
+                'redistributed unmodified (byte for byte; some library file names changed). Package versions:\n\n')
         f.write('\n'.join(sorted(sources)) + '\n')
-    total = sum(os.path.getsize(d) for _, d, _ in outputs)
+    total = sum(os.path.getsize(d) for _, d in outputs)
     print(f'{len(outputs)} files, {total >> 20} MiB -> {a.jnilibs}', file=sys.stderr)
 
 

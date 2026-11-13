@@ -2,6 +2,16 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-13 ~16:30 UTC: 🎉 iOS 16 LOCK SCREEN + CONTROL CENTER IN SWEET16 ON A GALAXY S25 ULTRA 🎉 <<<
+Sweet16 0.2.0 (fixed signing key, slto_us/tlto_us=10 s), 4 cores / 4 GB, rootfs built on the phone (Termux VM),
+Developer boot DeviceTree = DT-d22ap.bin with "Generated + /product" (fixed `IODeviceTree:/product -> none`,
+now `-> IOPlatformDevice`). After ~1 h on the Apple logo and a black phase: lock screen (clock, camera button,
+battery 100% charging) and Control Center (airplane/AirDrop/Wi-Fi/Bluetooth tiles, Now Playing "Loading...",
+brightness/volume, Focus) drawn by SpringBoard through ramfb; touch gestures work.
+Observed oddities: date shows "Wednesday, December 31" (no RTC: QEMU virt's PL031 is not used by the kernel ->
+time near the epoch); lock-screen clock is red (cause unknown: tint/Focus or a colour path; Control Center colours
+look right). NEXT: unlock (swipe up) -> home screen; RTC; README/Release.
+
 ### >>> 2026-11-13 ~15:45 UTC: second S25 boot (kernel log off) -> Apple logo, then panic <<<
 - With "Show the kernel log" off: Apple logo ~4+ min, then black with fbcon lines from identityservicesd
   (`SK[n]: __nexus_register ... nxprov_create: 1`, Skywalk retries, no network: harmless), then

@@ -2,6 +2,14 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> CI 2026-11-13 02:25 UTC <<<
+Push works now. android.yml runs 43349974261 and 43351628928: the `apk` job (ubuntu) PASSES (Termux QEMU, unit
+tests, APK artifact `Sweet16-apk`, but without a kernel). The `kernel / build` job (macos-14, via xnu.yml) is
+cancelled 1 s after creation with no runner and 0 billable ms, both times, also after dropping xnu.yml's
+concurrency group (c6b3093). So GitHub does not hand this repo a macOS runner (private repo without macOS
+minutes/spending limit, or an Actions policy): the user has to fix that or build the kernel on a Mac.
+Patch 0082 is therefore still uncompiled.
+
 ### >>> UPDATE 2026-11-13 (later): Developer boot, PL011 console, user files <<<
 
 User asked: XNU-on-QEMU (not phone drivers), early verbose serial/fb boot first, file pickers for their own

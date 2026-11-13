@@ -56,6 +56,12 @@ kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
+// The boot stub (tools/virt-stub/stub.bin, committed) goes into assets/boot.
+// CI adds assets/boot/kernel (xnu build) and assets/boot/sweet-sh (self-test).
+val stubAssets = layout.buildDirectory.dir("generated/sweet-assets").get().asFile
+rootProject.file("../tools/virt-stub/stub.bin").copyTo(File(stubAssets, "boot/stub.bin"), overwrite = true)
+android.sourceSets["main"].assets.srcDir(stubAssets)
+
 dependencies {
     testImplementation("junit:junit:4.13.2")
 }

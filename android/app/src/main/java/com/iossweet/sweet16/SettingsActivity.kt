@@ -82,8 +82,8 @@ class SettingsActivity : Activity() {
         })
 
         section("Storage")
-        val b = store.bundle()
-        text(if (b != null) "Boot files: ${b.name} (${b.version}), ${b.ramMb} MB guest RAM" else "Boot files: missing")
+        text("Kernel: ${store.kernelLabel()} · guest RAM ${store.ramMb} MB")
+        if (store.userDeviceTree.isFile) text("Apple DeviceTree: picked (${store.userDeviceTree.length() shr 10} KB, /product used)")
         text(if (store.hasDisk()) "iOS disk: ${store.disk.length() shr 30} GB image, " +
             "${usedBytes(store.disk) shr 20} MB used on this phone" else "iOS disk: not imported")
         button("Delete the iOS disk", danger = true) {

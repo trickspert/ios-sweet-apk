@@ -14,12 +14,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.GZIPInputStream
-import java.util.zip.ZipInputStream
 
 /**
  * Imports the iOS 16 root disk (raw HFS+ image from tools/mkiosroot.sh,
- * optionally gzip-compressed or as an Android sparse image from img2simg)
- * and boot bundles (zip with bundle.json, ram.bin, stub.bin).
+ * optionally gzip-compressed or as an Android sparse image from img2simg).
  *
  * The disk is written sparse: runs of zero blocks become holes, so a 16 GB
  * image only takes the space iOS actually uses.
@@ -97,32 +95,6 @@ class Importer(private val context: Context, private val store: Store) {
             if (s != "H+" && s != "HX") {
                 throw IOException("not an HFS+ volume (build it with tools/mkiosroot.sh)")
             }
-        }
-    }
-
-    /** Boot bundle zip: bundle.json, ram.bin, stub.bin (any folder level). */
-    fun importBundle(uri: Uri, progress: Progress) {
-        val total = sourceSize(uri)
-        val tmp = File(store.files, "bundle.import")
-        tmp.deleteRecursively()
-        tmp.mkdirs()
-        try {
-            val input = context.contentResolver.openInputStream(uri) ?: throw IOException("cannot open the file")
-            ZipInputStream(BufferedInputStream(CountingStream(input, total, progress), 1 shl 16)).use { zip ->
-                while (true) {
-                    val e = zip.nextEntry ?: break
-                    val name = e.name.substringAfterLast('/')
-                    if (!e.isDirectory && name in setOf("bundle.json", "ram.bin", "stub.bin")) {
-                        File(tmp, name).outputStream().use { zip.copyTo(it, 1 shl 20) }
-                    }
-                    checkCancel()
-                }
-            }
-            Bundle.load(tmp) ?: throw IOException("not a boot bundle (needs bundle.json, ram.bin, stub.bin)")
-            store.bundleDir.deleteRecursively()
-            if (!tmp.renameTo(store.bundleDir)) throw IOException("cannot move the bundle into place")
-        } finally {
-            tmp.deleteRecursively()
         }
     }
 

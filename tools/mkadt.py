@@ -5,6 +5,7 @@ Only what the early boot path actually reads (see NOTES.md); every MMIO
 address comes from the sweet live FDT. Usage:
   mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
   mkadt.py OUT.adt --virt [--ram-mb N]     (QEMU virt machine, Android app)
+  --seed HEX (fixed random-seed, for tests)  --product ADT (/product source, default D22AP_ADT)
 """
 import hashlib, os, struct, sys
 
@@ -86,7 +87,7 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, virt=False, ram_mb=4096):
+def build(seed=None, qemu=False, highmem=False, virt=False, ram_mb=4096, product_adt=D22AP_ADT):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
     virt=True: QEMU virt as a full machine (virtio disk/input, PL011, SMP over hvc PSCI)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
@@ -207,7 +208,15 @@ def build(seed=None, qemu=False, highmem=False, virt=False, ram_mb=4096):
             ('compatible', cstr('sweet,display')),
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
-        ])])
+        ])] + ([
+        # --virt: QEMU's PL011 as the kernel console (pe_serial.c VMAPPLE_UART,
+        # enabled in SWEET.h): serial output from the first kprintf, and input.
+        node('uart0', [
+            ph(),
+            ('device_type', cstr('serial')),
+            ('compatible', cstr('arm,pl011')),
+            ('reg', u64(QEMU_PL011 - SOC_BASE, 0x1000)),
+        ])] if virt else []))
 
     fb_w, fb_h = (VIRT_FB_W, VIRT_FB_H) if virt else (FB_W, FB_H)
     fbcon = node('sweet-fbcon', [
@@ -240,17 +249,16 @@ def build(seed=None, qemu=False, highmem=False, virt=False, ram_mb=4096):
         ('opposed-power-vol-buttons', u32(1)),
     ])
 
-    # bsd/dev/sweet_virtio.c: virtio-mmio transports, the console UART and
-    # the PSCI conduit of QEMU virt (no EL2/EL3: PSCI is an hvc).
+    # bsd/dev/sweet_virtio.c: virtio-mmio transports and the PSCI conduit of
+    # QEMU virt (no EL2/EL3: PSCI is an hvc). The console is /arm-io/uart0.
     virtio = virt and node('sweet-virtio', [
         ph(),
         ('compatible', cstr('sweet,virt')),
         ('reg', u64(QEMU_VIRTIO_MMIO, QEMU_VIRTIO_STRIDE, QEMU_VIRTIO_COUNT)),
-        ('uart', u64(QEMU_PL011)),
         ('psci-hvc', u32(1)),
     ])
 
-    product_props = d22ap_product()
+    product_props = d22ap_product(product_adt)
     product = [node('product', [ph()] + product_props)] if product_props else []
 
     # Panic log region. /pram reg = <phys size>; it sits just above the
@@ -274,9 +282,11 @@ def build(seed=None, qemu=False, highmem=False, virt=False, ram_mb=4096):
 
 
 if __name__ == '__main__':
-    ram_mb = int(sys.argv[sys.argv.index('--ram-mb') + 1]) if '--ram-mb' in sys.argv else 4096
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 virt='--virt' in sys.argv, ram_mb=ram_mb)
+    opt = lambda k, d=None: sys.argv[sys.argv.index(k) + 1] if k in sys.argv else d
+    root = build(seed=bytes.fromhex(opt('--seed')) if opt('--seed') else None,
+                 qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+                 virt='--virt' in sys.argv, ram_mb=int(opt('--ram-mb', 4096)),
+                 product_adt=opt('--product', D22AP_ADT))
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

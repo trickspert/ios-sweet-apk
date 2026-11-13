@@ -5,8 +5,10 @@
 #   tools/qemu-sweet-virt.sh BUNDLE_DIR DISK.img [RUN_DIR]
 #
 # Screen and input: VNC on RUN_DIR/vnc.sock (e.g. `vncviewer RUN_DIR/vnc.sock`,
-# or SWEET16_VNC_SOCKET for the app's RfbClientTest). Kernel console:
-# RUN_DIR/console.log. QMP: RUN_DIR/qmp.sock. Env: CPUS (default 4).
+# or SWEET16_VNC_SOCKET for the app's RfbClientTest). Kernel console (PL011):
+# RUN_DIR/console.log, interactive on RUN_DIR/serial.sock
+# (`socat - UNIX-CONNECT:RUN_DIR/serial.sock`). QMP: RUN_DIR/qmp.sock.
+# Env: CPUS (default 4), DISK=none to boot without the virtio disk.
 set -eu
 bundle=$(cd "$1" && pwd)
 disk=$2
@@ -33,7 +35,12 @@ with open(f'{b}/ram.bin', 'r+b') as f:
     f.write(line.ljust(m['cmdline_max'], b'\0'))
 EOF
 
-rm -f "$run/vnc.sock" "$run/qmp.sock"
+rm -f "$run/vnc.sock" "$run/qmp.sock" "$run/serial.sock"
+if [ "$disk" = none ]; then
+    drive=""
+else
+    drive="-drive if=none,id=root,file=$disk,format=raw,cache=writeback,aio=threads -device virtio-blk-device,drive=root"
+fi
 echo "run dir: $run" >&2
 exec qemu-system-aarch64 \
     -nodefaults -no-user-config \
@@ -41,11 +48,11 @@ exec qemu-system-aarch64 \
     -accel tcg,thread=multi,tb-size=256 \
     -display none -vnc "unix:$run/vnc.sock" \
     -qmp "unix:$run/qmp.sock,server=on,wait=off" \
-    -serial "file:$run/console.log" \
+    -chardev "socket,id=con,path=$run/serial.sock,server=on,wait=off,logfile=$run/console.log,logappend=off" \
+    -serial chardev:con \
     -device ramfb \
     -global virtio-mmio.force-legacy=false \
-    -drive "if=none,id=root,file=$disk,format=raw,cache=writeback,aio=threads" \
-    -device virtio-blk-device,drive=root \
+    $drive \
     -device virtio-tablet-device -device virtio-keyboard-device \
     -device "loader,file=$bundle/ram.bin,addr=$phys,force-raw=on" \
     -device "loader,file=$bundle/stub.bin,addr=$stub,force-raw=on" \

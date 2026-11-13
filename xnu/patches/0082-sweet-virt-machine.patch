@@ -153,10 +153,10 @@ index 6b926fe..0138fc4 100644
  	sweet_touch_init();
 diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
 new file mode 100644
-index 0000000..c8b164e
+index 0000000..60627ab
 --- /dev/null
 +++ b/bsd/dev/sweet_virtio.c
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,652 @@
 +/*
 + * SWEET virtual machine ("sweet-virt"): the same kernel and iOS 16 userland
 + * inside QEMU's virt board, e.g. in the ios-sweet Android app on any arm64
@@ -166,7 +166,10 @@ index 0000000..c8b164e
 + * hardware there. Instead tools/mkadt.py --virt adds a /sweet-virtio node:
 + *
 + *   reg          <base stride count>  virtio-mmio transports (u64 each)
-+ *   uart         <base>               PL011 for the console mirror (u64)
++ *   uart         <base>               PL011 for a console mirror (u64), only for
++ *                                     trees without /arm-io/uart0: with uart0 the
++ *                                     kernel's own PL011 console (VMAPPLE_UART)
++ *                                     owns the port from the first kprintf
 + *   psci-hvc                          PSCI through hvc, not smc (SweetCPU.cpp)
 + *
 + * and this file drives, all polled (no interrupt routing needed):
@@ -1000,3 +1003,22 @@ index a62416c..5c54bba 100644
  bool
  IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
  {
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index b99c2f4..69c7689 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -17,6 +17,14 @@
+ 
+ #define SWEET                     1
+ 
++/*
++ * PL011 serial console (pe_serial.c, Apple's virtual-Mac driver): used when
++ * the ADT has /arm-io/uart0, i.e. on the sweet-virt machine (QEMU virt,
++ * tools/mkadt.py --virt). Output from the first kprintf, and console input.
++ * The phone's ADT has no uart0: there it stays unregistered.
++ */
++#define VMAPPLE_UART
++
+ /*
+  * All eight cores (six A55 + two A76) as one homogeneous SMP cluster:
+  * cpus=N is clamped here. Same ISA level (ARMv8.2), 64-byte lines, PSCI

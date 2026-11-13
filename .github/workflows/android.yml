@@ -60,14 +60,19 @@ jobs:
           name: xnu-kernel
           path: xnu/out
 
-      - name: Boot bundle
+      - name: Boot files (kernel, self-test shell)
         run: |
+          mkdir -p android/app/src/main/assets/boot
+          # sweet-sh: the interactive PID 1 of Developer boot (RAM disk, rd=md0)
+          clang -target arm64-apple-ios16.0 -c tools/sweet-shell.S -o "$RUNNER_TEMP/sweet-shell.o"
+          python3 tools/mkinit.py "$RUNNER_TEMP/sweet-shell.o" android/app/src/main/assets/boot/sweet-sh
           ls -la xnu/out || true
           if [ -f xnu/out/kernel.development.sweet ]; then
-            tools/mksweet16.sh xnu/out/kernel.development.sweet android/app/src/main/assets/bundle
-            cat android/app/src/main/assets/bundle/bundle.json
+            cp xnu/out/kernel.development.sweet android/app/src/main/assets/boot/kernel
+            # PC-side bundle too (same layout the app builds), for tools/qemu-sweet-virt.sh
+            tools/mksweet16.sh xnu/out/kernel.development.sweet "$RUNNER_TEMP/bundle" out-bundle.zip
           else
-            echo "::warning::no kernel artifact: the APK ships without boot files (import a bundle in the app)"
+            echo "::warning::no kernel artifact: the APK ships without a kernel (pick one in Developer boot)"
           fi
 
       - name: APK
@@ -83,10 +88,11 @@ jobs:
           gradle --no-daemon testDebugUnitTest assembleRelease
           mkdir -p ../out
           cp app/build/outputs/apk/release/app-release.apk ../out/Sweet16-iOS16-arm64.apk
+          [ -f ../out-bundle.zip ] && mv ../out-bundle.zip ../out/sweet16-boot-bundle.zip || true
           ls -la ../out
 
       - uses: actions/upload-artifact@v4
         with:
           name: Sweet16-apk
-          path: out/Sweet16-iOS16-arm64.apk
+          path: out/
           if-no-files-found: error

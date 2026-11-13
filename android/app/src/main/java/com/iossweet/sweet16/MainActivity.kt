@@ -78,9 +78,9 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.os_card).setOnClickListener { onCard() }
         findViewById<ImageButton>(R.id.os_more).setOnClickListener { showMenu(it) }
 
-        // Copy the boot files shipped in the APK (once per install/update).
+        // QEMU's keymap out of the APK (once).
         Thread({
-            try { store.installBundledBootFiles(); store.installQemuData() } catch (_: Exception) {}
+            try { store.installQemuData() } catch (_: Exception) {}
             preparing = false
             main.post { render() }
         }, "prepare").start()
@@ -106,7 +106,7 @@ class MainActivity : Activity() {
         VmState.phase == VmState.Phase.STARTING -> Ui.STARTING
         VmState.phase == VmState.Phase.RUNNING -> Ui.RUNNING
         preparing -> Ui.PREPARING
-        store.bundle() == null -> Ui.NO_BUNDLE
+        !store.hasKernel() -> Ui.NO_BUNDLE
         !store.hasDisk() -> Ui.NO_DISK
         VmState.phase == VmState.Phase.FAILED -> Ui.FAILED
         else -> Ui.READY
@@ -114,12 +114,11 @@ class MainActivity : Activity() {
 
     private fun render() {
         val state = ui()
-        val b = store.bundle()
         bannerProgress.visibility = View.GONE
         bannerButton.visibility = View.VISIBLE
         art.dimmed = state in setOf(Ui.NO_BUNDLE, Ui.NO_DISK, Ui.PREPARING, Ui.IMPORTING)
         when (state) {
-            Ui.PREPARING -> banner(R.drawable.ic_download, "Getting ready", "Unpacking the iOS 16 boot files…", null)
+            Ui.PREPARING -> banner(R.drawable.ic_download, "Getting ready", "Unpacking QEMU's files…", null)
             Ui.IMPORTING -> {
                 val pct = if (ImportJob.total > 0) (ImportJob.done * 1000 / ImportJob.total).toInt() else -1
                 banner(R.drawable.ic_download, "Importing ${ImportJob.what}",
@@ -129,8 +128,8 @@ class MainActivity : Activity() {
                 bannerProgress.isIndeterminate = pct < 0
                 if (pct >= 0) bannerProgress.progress = pct
             }
-            Ui.NO_BUNDLE -> banner(R.drawable.ic_warning, "Boot files missing",
-                "This build has no iOS 16 kernel. Import a boot bundle (.zip from tools/mkvirtbundle.py).", "Import")
+            Ui.NO_BUNDLE -> banner(R.drawable.ic_warning, "Kernel missing",
+                "This build has no kernel inside. Pick your kernel in Developer boot.", "Open")
             Ui.NO_DISK -> banner(R.drawable.ic_download, "Add your iOS 16 disk",
                 "Import the root image you built from the iPhone X IPSW (.img, .img.gz or .simg).", "Import")
             Ui.READY -> banner(R.drawable.ic_check, "iOS 16 is ready",
@@ -148,7 +147,7 @@ class MainActivity : Activity() {
             Ui.RUNNING -> "Running"
         }
         val disk = if (store.hasDisk()) " · ${(store.disk.length() + (1L shl 29)) shr 30} GB disk" else ""
-        specs.text = "${store.cores} cores · ${(b?.ramMb ?: 4096) / 1024} GB RAM$disk"
+        specs.text = "${store.cores} cores · ${store.ramMb / 1024} GB RAM$disk"
     }
 
     private fun banner(icon: Int, title: String, text: String, button: String?) {
@@ -166,7 +165,7 @@ class MainActivity : Activity() {
     private fun onBannerButton() {
         when (ui()) {
             Ui.IMPORTING -> ImportJob.importer?.cancelled?.set(true)
-            Ui.NO_BUNDLE -> pick(REQ_BUNDLE)
+            Ui.NO_BUNDLE -> startActivity(Intent(this, DevBootActivity::class.java))
             Ui.NO_DISK -> pick(REQ_DISK)
             Ui.READY, Ui.FAILED -> startVm()
             Ui.STARTING -> openVm()
@@ -180,7 +179,7 @@ class MainActivity : Activity() {
             Ui.READY, Ui.FAILED -> startVm()
             Ui.STARTING, Ui.RUNNING -> openVm()
             Ui.NO_DISK -> pick(REQ_DISK)
-            Ui.NO_BUNDLE -> pick(REQ_BUNDLE)
+            Ui.NO_BUNDLE -> startActivity(Intent(this, DevBootActivity::class.java))
             else -> {}
         }
     }
@@ -194,12 +193,13 @@ class MainActivity : Activity() {
         } else if (state == Ui.READY || state == Ui.FAILED) {
             m.menu.add(0, 3, 0, "Start")
         }
-        m.menu.add(0, 4, 2, "Kernel log")
+        m.menu.add(0, 4, 2, "Serial console & CPU state")
+        m.menu.add(0, 8, 3, "Boot details (QEMU command)")
         if (!VmState.active && !ImportJob.running) {
-            m.menu.add(0, 5, 3, "Import iOS disk…")
-            m.menu.add(0, 6, 4, "Import boot files…")
+            m.menu.add(0, 6, 4, "Developer boot (verbose, your files)…")
+            m.menu.add(0, 5, 5, "Import iOS disk…")
         }
-        m.menu.add(0, 7, 5, "Settings")
+        m.menu.add(0, 7, 6, "Settings")
         m.setOnMenuItemClickListener {
             when (it.itemId) {
                 1 -> openVm()
@@ -207,8 +207,9 @@ class MainActivity : Activity() {
                 3 -> startVm()
                 4 -> startActivity(Intent(this, ConsoleActivity::class.java))
                 5 -> pick(REQ_DISK)
-                6 -> pick(REQ_BUNDLE)
+                6 -> startActivity(Intent(this, DevBootActivity::class.java))
                 7 -> startActivity(Intent(this, SettingsActivity::class.java))
+                8 -> bootDetails()
             }
             true
         }
@@ -222,7 +223,7 @@ class MainActivity : Activity() {
             return // continues in onRequestPermissionsResult
         }
         ImportJob.error = null
-        VmService.start(this)
+        VmService.start(this, Launch.IOS)
         openVm()
     }
 
@@ -235,6 +236,23 @@ class MainActivity : Activity() {
     }
 
     private fun openVm() = startActivity(Intent(this, VmActivity::class.java))
+
+    /** The exact launch: from the running VM if there is one, else built now from the current settings. */
+    private fun bootDetails() {
+        Thread({
+            val text = if (VmState.active && store.lastLaunch.isFile) store.lastLaunch.readText()
+            else try { Launch.prepare(store, Launch.IOS).describe(store) } catch (e: Exception) { "Cannot build the iOS 16 boot: ${e.message}" }
+            main.post {
+                val tv = TextView(this).apply {
+                    this.text = text; typeface = android.graphics.Typeface.MONOSPACE; textSize = 10f
+                    setTextIsSelectable(true); setPadding(32, 16, 32, 16)
+                }
+                AlertDialog.Builder(this).setTitle("Boot details")
+                    .setView(android.widget.ScrollView(this).apply { addView(android.widget.HorizontalScrollView(this@MainActivity).apply { addView(tv) }) })
+                    .setPositiveButton("Close", null).show()
+            }
+        }, "details").start()
+    }
 
     private fun confirmStop() {
         AlertDialog.Builder(this)
@@ -259,7 +277,8 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK || ImportJob.running) return
         val importer = Importer(applicationContext, store)
         ImportJob.importer = importer
-        ImportJob.what = if (requestCode == REQ_DISK) "iOS 16 disk" else "boot files"
+        if (requestCode != REQ_DISK) return
+        ImportJob.what = "iOS 16 disk"
         ImportJob.done = 0
         ImportJob.total = importer.sourceSize(uri)
         ImportJob.error = null
@@ -267,7 +286,7 @@ class MainActivity : Activity() {
         Thread({
             try {
                 val progress = Importer.Progress { d, t -> ImportJob.done = d; ImportJob.total = t }
-                if (requestCode == REQ_DISK) importer.importDisk(uri, progress) else importer.importBundle(uri, progress)
+                importer.importDisk(uri, progress)
             } catch (e: InterruptedException) {
                 ImportJob.error = "cancelled"
             } catch (e: Throwable) {
@@ -290,7 +309,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_DISK = 1
-        private const val REQ_BUNDLE = 2
         private const val REQ_NOTIFY = 3
     }
 }

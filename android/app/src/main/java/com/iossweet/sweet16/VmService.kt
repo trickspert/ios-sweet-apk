@@ -29,13 +29,16 @@ object VmState {
         private set
     @Volatile var startedAt: Long = 0
         private set
+    @Volatile var profile: String = Launch.IOS
+        private set
 
     private val main = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
 
-    fun set(p: Phase, msg: String = "") {
+    fun set(p: Phase, msg: String = "", prof: String? = null) {
         phase = p
         message = msg
+        if (prof != null) profile = prof
         if (p == Phase.STARTING) startedAt = System.currentTimeMillis()
         main.post { listeners.forEach { it() } }
     }
@@ -66,33 +69,33 @@ class VmService : Service() {
                 stopVm()
                 return START_NOT_STICKY
             }
-            else -> startVm()
+            else -> startVm(intent?.getStringExtra(EXTRA_PROFILE) ?: Launch.IOS)
         }
         return START_NOT_STICKY
     }
 
-    private fun startVm() {
+    private fun startVm(profile: String) {
         if (process != null) return
         goForeground()
-        VmState.set(VmState.Phase.STARTING, "Starting the virtual machine")
-        Thread({ launch() }, "qemu-launch").start()
+        VmState.set(VmState.Phase.STARTING, "Building the boot image", profile)
+        Thread({ launch(profile) }, "qemu-launch").start()
     }
 
-    private fun launch() {
+    private fun launch(profile: String) {
         val store = Store(this)
         try {
             store.installQemuData()
-            val bundle = store.bundle() ?: throw IllegalStateException("The boot files are missing")
-            if (!store.hasDisk()) throw IllegalStateException("The iOS 16 disk is missing")
             val qemu = store.qemuBinary()
             if (!qemu.isFile) throw IllegalStateException("QEMU is not in this APK (${qemu.path})")
-
-            bundle.writeCmdline(bootArgs(store, bundle))
+            val launch = Launch.prepare(store, profile)
             store.vncSocket.delete()
             store.qmpSocket.delete()
+            store.serialSocket.delete()
             store.consoleLog.delete()
-
-            val args = qemuArgs(store, bundle)
+            store.qemuDebugLog.delete()
+            // Exactly what runs, for "Boot details" and bug reports.
+            store.lastLaunch.writeText(launch.describe(store))
+            val args = launch.args
             Log.i(TAG, "qemu " + args.joinToString(" "))
             val pb = ProcessBuilder(listOf(qemu.path) + args)
                 .directory(filesDir)
@@ -115,7 +118,7 @@ class VmService : Service() {
             if (!p.isAliveCompat()) {
                 throw IllegalStateException("QEMU exited: " + store.qemuLog.readTail(600))
             }
-            VmState.set(VmState.Phase.RUNNING, "iOS 16 is booting")
+            VmState.set(VmState.Phase.RUNNING, "QEMU is running (pid ${pidOf(p)})", profile)
             val code = p.waitFor()
             process = null
             if (VmState.phase != VmState.Phase.STOPPED) {
@@ -172,7 +175,7 @@ class VmService : Service() {
             PendingIntent.FLAG_IMMUTABLE)
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_phone)
-            .setContentTitle("iOS 16 is running")
+            .setContentTitle("Sweet16 virtual machine is running")
             .setContentText("Tap to open. The virtual machine keeps running in the background.")
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
@@ -198,54 +201,28 @@ class VmService : Service() {
         wakeLock = null
     }
 
+    private fun pidOf(p: Process): String = try {
+        p.javaClass.getDeclaredField("pid").apply { isAccessible = true }.get(p).toString()
+    } catch (e: Exception) {
+        "?"
+    }
+
     companion object {
         private const val TAG = "Sweet16"
+        const val EXTRA_PROFILE = "profile"
         private const val CHANNEL = "vm"
         private const val NOTIFICATION_ID = 16
         const val ACTION_START = "start"
         const val ACTION_STOP = "stop"
 
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, VmService::class.java).setAction(ACTION_START))
+        fun start(context: Context, profile: String = Launch.IOS) {
+            context.startForegroundService(Intent(context, VmService::class.java).setAction(ACTION_START)
+                .putExtra(EXTRA_PROFILE, profile))
         }
 
         fun stop(context: Context) {
             context.startService(Intent(context, VmService::class.java).setAction(ACTION_STOP))
         }
-
-        /** Kernel boot-args: the bundle's line with the app's settings applied. */
-        fun bootArgs(store: Store, bundle: Bundle): String {
-            val drop = setOf("cpus", "sweetfb_noconsole")
-            val words = bundle.cmdline.split(' ').filter { it.isNotBlank() && it.substringBefore('=') !in drop }
-                .toMutableList()
-            words += "cpus=${store.cores}"
-            if (!store.showKernelLog) words += "sweetfb_noconsole=1"
-            words += store.extraBootArgs.split(' ').filter { it.isNotBlank() }
-            return words.joinToString(" ").take(bundle.cmdlineMax - 1)
-        }
-
-        fun qemuArgs(store: Store, bundle: Bundle): List<String> = listOf(
-            "-nodefaults", "-no-user-config",
-            "-L", store.qemuData.path,
-            "-M", "virt,gic-version=3,highmem=on",
-            "-cpu", "cortex-a76",
-            "-smp", "${store.cores}",
-            "-m", "${bundle.ramMb}",
-            "-accel", "tcg,thread=multi,tb-size=${store.tbSizeMb}",
-            "-display", "none",
-            "-vnc", "unix:${store.vncSocket.path}",
-            "-qmp", "unix:${store.qmpSocket.path},server=on,wait=off",
-            "-serial", "file:${store.consoleLog.path}",
-            "-device", "ramfb",
-            "-global", "virtio-mmio.force-legacy=false",
-            "-drive", "if=none,id=root,file=${store.disk.path},format=raw,cache=writeback,aio=threads",
-            "-device", "virtio-blk-device,drive=root",
-            "-device", "virtio-tablet-device",
-            "-device", "virtio-keyboard-device",
-            "-device", "loader,file=${bundle.ramBin.path},addr=0x%x,force-raw=on".format(bundle.physBase),
-            "-device", "loader,file=${bundle.stubBin.path},addr=0x%x,force-raw=on".format(bundle.stubPa),
-            "-device", "loader,addr=0x%x,cpu-num=0".format(bundle.stubPa),
-        )
 
         /** One QMP command; returns the raw reply line or null. */
         fun qmp(store: Store, command: String): String? = try {

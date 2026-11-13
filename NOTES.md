@@ -2,6 +2,30 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> UPDATE 2026-11-13 (later): Developer boot, PL011 console, user files <<<
+
+User asked: XNU-on-QEMU (not phone drivers), early verbose serial/fb boot first, file pickers for their own
+decrypted kernelcache / device tree / ramdisk, no simulated screens, show the exact QEMU command + boot-args.
+
+- Kernel 0082 now also `#define VMAPPLE_UART` in SWEET.h: XNU's PL011 driver (pe_serial.c) registers when the ADT has
+  /arm-io/uart0 (only `mkadt.py --virt` adds it: reg 0x08000000 rel. SOC_BASE = PA 0x09000000) -> serial output from the
+  first kprintf and console input (serial=3). The sweet_virtio.c PL011 mirror only runs if /sweet-virtio has `uart`
+  (no longer emitted). UNCOMPILED like the rest of 0082.
+- `tools/sweet-shell.S` -> sweet-sh: static PID 1 (mkinit.py), prompt `sweet#`, uname/hw/pid/help via sysctlbyname.
+  Assembles and wraps locally (16635 bytes); never executed yet (needs a kernel).
+- App builds the boot image itself (`android/.../boot/`): Adt.kt, VirtAdt.kt (= mkadt.py --virt), BootBuilder.kt
+  (= mkpayload.py + build_image + mkvirtbundle.py; MH_EXECUTE and MH_FILESET via LC_FILESET_ENTRY com.apple.kernel;
+  chained fixups fmt 2/6/8/1/7/9/12; RAM disk -> /chosen/memory-map RAMDisk; APPLE_AS_IS mode sets /chosen dram-*).
+  `BootBuilderTest` (needs python3): ADT, ram.bin, stub.bin byte-identical to the Python tools for a generated
+  kernel-shaped Mach-O with chained fixups + /product source (`android/app/src/test/python/mkfakekernel.py`). PASSES.
+  mkadt.py got `--seed HEX` and `--product ADT` (phone ADTs unchanged, fixed-seed hashes identical).
+- Serial: QEMU `-chardev socket,id=con,path=serial.sock,server=on,wait=off,logfile=console.log,logappend=off -serial chardev:con`.
+  Verified on PC QEMU 8.2 with a stand-in PL011 echo guest: output in socket + console.log, input reaches the guest RX.
+  QMP `info registers -a` returns live registers (PC in the stand-in loop, X0 = boot_args 0xb0008000).
+- UI: Developer boot screen (pickers, ADT mode, RAM disk none/self-test/file, attach disk, boot-args presets,
+  "Show exact QEMU command", -d int option), Console screen (terminal, QEMU log, CPU regs, Boot details).
+- Still blocked: no push (403), so no kernel build; nothing run on Android.
+
 ### >>> UPDATE 2026-11-13: Sweet16 Android app (sweet-virt machine) - read first <<<
 
 The user asked for an APK version that runs on Samsung phones. An app cannot boot XNU on bare metal, so the

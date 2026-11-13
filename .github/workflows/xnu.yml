@@ -15,6 +15,9 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+      runner:
+        description: macOS runner label
+        default: macos-15
   # android.yml builds the kernel through this workflow too
   workflow_call:
     inputs:
@@ -30,6 +33,9 @@ on:
       keep_going:
         type: string
         default: "false"
+      runner:
+        type: string
+        default: macos-15
   push:
     branches: [main]
     paths:
@@ -48,9 +54,10 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    # macos-14 (the last image with Xcode 15) no longer gets runners (2026-11:
+    # jobs are cancelled at once, 0 billable ms). macos-15 has Xcode 16.0+:
+    # patch 0083 gives xnu-8796 the IORPC.kernelContent field Xcode 16's iig uses.
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4

@@ -2,6 +2,15 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> CI 2026-11-13 02:40 UTC: why the kernel job was cancelled <<<
+`runner-probe.yml` (run 43353091183): macos-15, macos-latest, macos-26, ubuntu-24.04 get runners in ~2 s;
+**macos-14 is cancelled at once (no runner, 0 ms)** = that image is retired. Not billing, not concurrency.
+macos-15 = macOS 15.8.2 with Xcode 16.0-16.4 + 26.x only (no Xcode 15). Xcode 16's iig needs IORPC.kernelContent
+(xnu-11215 ABI): new `xnu/patches/0083-xcode16-iig-iorpc-kernelcontent.patch` adds the field (KERNEL only) to
+iokit/IOKit/IORPC.h + iokit/DriverKit/IORPC.h and sets it at both IORPC constructions in IOUserServer.cpp
+(uext message trap and the simple-reply trap), as xnu-11215 does. xnu.yml: runs-on input `runner`, default macos-15
+(workflow selects the oldest Xcode = 16.0). The repo is public; user enabled all actions + reusable workflows.
+
 ### >>> CI 2026-11-13 02:25 UTC <<<
 Push works now. android.yml runs 43349974261 and 43351628928: the `apk` job (ubuntu) PASSES (Termux QEMU, unit
 tests, APK artifact `Sweet16-apk`, but without a kernel). The `kernel / build` job (macos-14, via xnu.yml) is

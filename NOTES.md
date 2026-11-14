@@ -2,6 +2,33 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-14 ~22:30 UTC: date/time + internet (patch 0085) - CI building, untested on the phone <<<
+- User tested Safari: it opens (Favorites page, blank apple.com without network). Asked for Wi-Fi + date/time.
+- Found on PC: every boot waited exactly 30 s in IOKitInitializeTime (no "IORTC" resource) - visible as a
+  30.0 s gap after "using 2900 buffer headers". 0085 publishes IORTC from SweetPlatformExpert and reads
+  QEMU virt's PL031 (0x09010000, PrimeCell ID checked) in getGMTTimeOfDay -> real UTC, ~30 s faster boot.
+- 0085 virtio-net (sweet_virtio.c, started from bsd_init after net_init_run): en0, polled 1 ms busy / 10 ms
+  idle, BPF in/out, SIOCGIFMEDIA active; boot-arg sweetnet=0/1(default, configd DHCP)/2(kernel 10.0.2.15/24).
+  SweetNet.cpp defines empty IONetworkController/IOEthernetController/IONetworkInterface/IOEthernetInterface
+  classes (IONetworkingFamily is a kext we lack) and publishes en0 with IOInterfaceType 6, IOBuiltin,
+  BSD Name, IOInterfaceUnit 0 (= already named for InterfaceNamer), controller IOMACAddress - what
+  configd's SCNetworkInterface/InterfaceNamer/PreferencesMonitor read (sources: apple-oss-distributions
+  configd-1405, bootp). Kernel console milestones: "SWEET NET: iOS sent its first DHCP request", "first DHCP
+  answer", "en0 IPv4 address ...", first DNS query/answer, first TCP connection.
+- App: -netdev user,id=net0,ipv6=off -device virtio-net-device; INTERNET permission; Settings switch.
+  Termux libslirp reads /data/data/com.termux/files/usr/etc/resolv.conf for DNS forwarding (unreadable
+  for the app -> DNS would fail): fetch-termux-qemu.py rewrites that string to
+  /data/data/com.iossweet.sweet16/files/dns (NUL-padded, 31 bytes differ); VmService writes the phone's DNS
+  servers there (ConnectivityManager), fallback 1.1.1.1/8.8.8.8.
+- Test tools: tools/virt-tests/nettest.c + build-nettest.sh (PID 1, raw syscalls; needs -ffixed-x18: XNU
+  clears x18). On the OLD kernel it prints time 30 (=the 30 s wait) and ENETUNREACH (51), as expected.
+  tools/xnu-cc.py works with Ubuntu clang 18 (XNU_CC_CLANG=/usr/bin/clang) on the CI buildtree + job log.
+- Commits 095160b (0085 + app), da3ad0a (milestone logs); CI android run 43646191543; stage-test run
+  43646259120 waits for it and copies artifacts into a draft release (this session cannot delete releases).
+- Next: download kernel, Developer boot nettest with sweetnet=2 (expect real date, DNS answer, HTTP 200 from
+  python -m http.server 8080 on the host via 10.0.2.2), then send the APK. Unknown until the phone test:
+  whether configd picks en0 up (if not: check the milestone lines; DHCP request missing = configd side).
+
 ### >>> 2026-11-14 later: user confirmed fast mode is faster on the S25 Ultra -> merged to main, new release <<<
 - User: "its good now it's faster" (no exact time given). Asked to publish as an update and keep the old
 - PR #6 merged (f1d603f); android run 43641623387 all green -> release sweet16-build-19 (APK + boot bundle).

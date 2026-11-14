@@ -2,6 +2,33 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-14 ~23:30 UTC: phone test of 0085: no internet; 0086 = configd fix + VNC heartbeat + photo sharing <<<
+- User (S25): "nothing loads after 5 mins"; display 3-12 fps; asked for >=30 Hz, wallpaper/photos, Notes app.
+  No log yet (asked for Copy log + home-screen screenshot).
+- Root cause found in configd sources (not yet confirmed on the phone): InterfaceNamer's updateInterfaces()
+  returns at once while S_connect == NULL, i.e. until IOServiceOpen of an "IONetworkStack" service works
+  (IONetworkingFamily kext, absent) -> no naming, no pre-configured list, "No network stack object".
+  Also PreferencesMonitor sets haveConfiguration=TRUE when preferences.plist has a current set (true on the
+  user's disk after earlier boots) and then never adds services for new interfaces. 0086 (SweetNet.cpp):
+  IONetworkStack on IOResources + IONetworkStackUserClient (setProperties accepts/ignores naming; logs
+  "SWEET NET: IONetworkStack naming request"), en0 gets HiddenConfiguration=true -> builtin+hidden =
+  _SCNetworkInterfaceIsApplePreconfigured -> InterfaceNamer shares it as pre-configured ->
+  PreferencesMonitor addPreconfiguredServices(): Setup: DHCP + IPv6 automatic service every boot (not saved).
+- VNC latency measured on PC (dev boot, kernel console changes, tools: scratchpad vnclat.py): first update
+  562 ms, 998 ms, >3000 ms after 8 s idle = QEMU vnc_refresh backoff (+50 ms per idle poll up to 3 s).
+  0086 SweetFramebuffer: XOR bit 0 of the panel's last pixel every vsync (boot-arg sweetfb_heartbeat,
+  default on with sweet-virt). App: RfbClient re-requests immediately (VmActivity used minFrameMs=33 ->
+  missed polls -> more backoff), ignores the heartbeat tile (w<=16,h==1,last row) for redraws.
+  Kernel log no longer drawn over iOS by default (pref key kernel_log_over_ios, default false ->
+  sweetfb_noconsole=1).
+- Photos: ShareServer.kt (JVM-tested) serves Store.shareDir on 127.0.0.1:16016 while iOS runs = iOS Safari
+  http://10.0.2.2:16016 (slirp maps 10.0.2.2 to host loopback); main menu "Share photos with iOS..." (photo
+  picker), Settings "Photos for iOS".
+- Not done / ideas: iOS renders 1125x2436 in software (CoreAnimation CPU renderer) - the real fps limit;
+  rendering at @2x would need MobileGestalt cache changes (main-screen-*), not attempted blind. Shared-memory
+  display (QEMU memory-backend-memfd is in the Termux build) could replace VNC later.
+- Commit eac7f14, CI android run 43650636850, stage-test updated (9eeb909).
+
 ### >>> 2026-11-14 ~22:30 UTC: date/time + internet (patch 0085) - CI building, untested on the phone <<<
 - User tested Safari: it opens (Favorites page, blank apple.com without network). Asked for Wi-Fi + date/time.
 - Found on PC: every boot waited exactly 30 s in IOKitInitializeTime (no "IORTC" resource) - visible as a

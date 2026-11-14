@@ -2,6 +2,12 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-14 later: user confirmed fast mode is faster on the S25 Ultra -> merged to main, new release <<<
+- User: "its good now it's faster" (no exact time given). Asked to publish as an update and keep the old
+  releases: android.yml release job makes a new sweet16-build-N tag; older releases are untouched.
+- Still open for the user: delete the draft "Sweet16 test build (run 43638670856)" and the "Sweet16bin"
+  release (it holds DT-d22ap.bin, an Apple file). This session cannot edit/delete releases.
+
 ### >>> 2026-11-14 ~21:00 UTC: fast mode (patch 0084) built + verified on PC; NOT yet tried on the phone <<<
 - Commit cabd8b1 (branch only, NOT main): kernel patch 0084 + app "Fast mode" (Settings, default on).
   Fast mode drops `-enable_kprintf_spam`, adds `telemetry_sample_all_tasks=0 sweetiolog=- sweetsample=-`

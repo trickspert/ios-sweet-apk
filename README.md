@@ -54,17 +54,18 @@ It starts a small Ubuntu VM (an unrooted phone can't mount disk images, the VM c
 1. **Import** → `Download/rootfs.img`. Wait for **"iOS 16 is ready"**.
 2. **⋮ → Developer boot → Pick DeviceTree…** → `Download/DT-d22ap.bin`, and select **"Generated + /product from your Apple DeviceTree"**. iOS needs this to know it is an iPhone X; without it, it stays on the Apple logo.
 3. **Settings (gear) → Battery: allow background use**, so Android doesn't stop the VM.
-4. Optional: Settings → CPU cores (4 is the default; 6 on 8-core phones is faster).
+4. Optional: Settings → CPU cores (6 is the default on 8-core phones, else half the cores).
+5. **Fast mode** (Settings, on by default) makes iOS boot and run faster: the kernel skips debugging work (per-thread telemetry sampling, IOKit tracing, extra logging) and does not start `bluetoothd` and `fairplayd.H2`, which only crash and restart without their hardware. Turn it off only to collect detailed logs.
 
 ### 4. Start iOS 16
 
-Tap **Start**. You see the Apple logo for a long time on the first boot (about an hour, while iOS sets itself up), possibly a black screen, then the lock screen. Later boots are much faster: about 4 minutes on a Galaxy S25 Ultra. Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
+Tap **Start**. You see the Apple logo for a long time on the first boot (about an hour, while iOS sets itself up), possibly a black screen, then the lock screen. Later boots are much faster: about 4 minutes on a Galaxy S25 Ultra, and quicker still with Fast mode (since 2026-11-14). Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
 
-### What works in Sweet16 (2026-11-13)
+### What works in Sweet16 (2026-11-14)
 
 | | |
 | --- | --- |
-| Kernel | XNU boots on 4 virtual CPUs, kernel console on the serial port |
+| Kernel | XNU boots on up to 8 virtual CPUs (6 by default on 8-core phones), kernel console on the serial port; Fast mode |
 | iOS userland | launchd, the system daemons, backboardd, SpringBoard |
 | Screen | Apple logo, **lock screen**, **Control Center**, **home screen**, the **Settings** app (iOS draws at 1125×2436, shown at half size) |
 | Input | Touch and iOS gestures: swipe up to unlock and to leave apps (back to the home screen), app switcher, Control Center; Home, Lock and volume buttons |

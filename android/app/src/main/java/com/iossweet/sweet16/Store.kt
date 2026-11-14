@@ -37,6 +37,8 @@ class Store(private val context: Context) {
      * android/tools/fetch-termux-qemu.py instead of Termux's resolv.conf).
      */
     val dnsFile = File(files, "dns")
+    /** Photos picked on Android for iOS, served at ShareServer.IOS_URL while iOS runs. */
+    val shareDir = File(files, "share")
     val bootDir = File(context.cacheDir, "boot")
     val selftestRamdisk = File(files, "sweet-sh")
     val vncSocket = File(context.cacheDir, "vnc.sock")
@@ -62,9 +64,14 @@ class Store(private val context: Context) {
     var network: Boolean
         get() = bool("network", true)
         set(v) = prefs.edit().putBoolean("network", v).apply()
+    /**
+     * Keep drawing the kernel log over iOS after its first frame. Off: the log is on
+     * screen while booting and then only in Kernel log (each new line scrolled the
+     * whole framebuffer, over the GUI, costing emulated CPU).
+     */
     var showKernelLog: Boolean
-        get() = bool("kernel_log", true)
-        set(v) = prefs.edit().putBoolean("kernel_log", v).apply()
+        get() = bool("kernel_log_over_ios", false)
+        set(v) = prefs.edit().putBoolean("kernel_log_over_ios", v).apply()
     var forwardVolumeKeys: Boolean
         get() = bool("volume_keys", true)
         set(v) = prefs.edit().putBoolean("volume_keys", v).apply()

@@ -199,7 +199,8 @@ class MainActivity : Activity() {
             m.menu.add(0, 6, 4, "Developer boot (verbose, your files)…")
             m.menu.add(0, 5, 5, "Import iOS disk…")
         }
-        m.menu.add(0, 7, 6, "Settings")
+        m.menu.add(0, 9, 6, "Share photos with iOS…")
+        m.menu.add(0, 7, 7, "Settings")
         m.setOnMenuItemClickListener {
             when (it.itemId) {
                 1 -> openVm()
@@ -210,6 +211,7 @@ class MainActivity : Activity() {
                 6 -> startActivity(Intent(this, DevBootActivity::class.java))
                 7 -> startActivity(Intent(this, SettingsActivity::class.java))
                 8 -> bootDetails()
+                9 -> pickPhotos()
             }
             true
         }
@@ -270,9 +272,59 @@ class MainActivity : Activity() {
         startActivityForResult(i, req)
     }
 
+    @Suppress("DEPRECATION")
+    private fun pickPhotos() {
+        val i = if (Build.VERSION.SDK_INT >= 33) {
+            Intent(android.provider.MediaStore.ACTION_PICK_IMAGES)
+                .putExtra(android.provider.MediaStore.EXTRA_PICK_IMAGES_MAX,
+                    minOf(50, android.provider.MediaStore.getPickImagesMaxLimit()))
+        } else {
+            Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        startActivityForResult(i, REQ_PHOTOS)
+    }
+
+    /** Copy the picked photos into Store.shareDir (ShareServer serves them to iOS). */
+    private fun sharePhotos(data: Intent) {
+        val uris = mutableListOf<Uri>()
+        data.clipData?.let { c -> for (k in 0 until c.itemCount) uris += c.getItemAt(k).uri }
+        if (uris.isEmpty()) data.data?.let { uris += it }
+        if (uris.isEmpty()) return
+        Thread({
+            store.shareDir.mkdirs()
+            var n = 0
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+            for ((k, u) in uris.withIndex()) {
+                val ext = when (contentResolver.getType(u)) {
+                    "image/png" -> "png"; "image/gif" -> "gif"; "image/webp" -> "webp"
+                    "image/heic", "image/heif" -> "heic"; else -> "jpg"
+                }
+                try {
+                    contentResolver.openInputStream(u)?.use { inp ->
+                        java.io.File(store.shareDir, "photo-$stamp-${k + 1}.$ext").outputStream().use { inp.copyTo(it) }
+                    }
+                    n++
+                } catch (_: Exception) {}
+            }
+            main.post {
+                if (isFinishing) return@post
+                AlertDialog.Builder(this).setTitle("$n photo${if (n == 1) "" else "s"} shared with iOS")
+                    .setMessage("In iOS, open Safari and go to\n\n${ShareServer.IOS_URL}\n\n" +
+                        "Touch and hold a photo, then Add to Photos. For a wallpaper: Settings → Wallpaper.\n\n" +
+                        "Works while iOS runs with Internet for iOS on (Settings); no internet connection is needed.")
+                    .setPositiveButton("OK", null).show()
+            }
+        }, "share-photos").start()
+    }
+
     @Deprecated("startActivityForResult")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PHOTOS) {
+            if (resultCode == RESULT_OK && data != null) sharePhotos(data)
+            return
+        }
         val uri: Uri = data?.data ?: return
         if (resultCode != RESULT_OK || ImportJob.running) return
         val importer = Importer(applicationContext, store)
@@ -310,5 +362,6 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_DISK = 1
         private const val REQ_NOTIFY = 3
+        private const val REQ_PHOTOS = 4
     }
 }

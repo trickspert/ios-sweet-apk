@@ -126,7 +126,10 @@ class VmService : Service() {
             store.serialSocket.delete()
             store.consoleLog.delete()
             store.qemuDebugLog.delete()
-            if (store.network) writeDnsServers(store, log)
+            if (store.network) {
+                writeDnsServers(store, log)
+                startShareServer(store, log)
+            }
             // Exactly what runs, for "Boot details" and bug reports.
             store.lastLaunch.writeText(launch.describe(store))
             val args = launch.args
@@ -155,6 +158,7 @@ class VmService : Service() {
             VmState.set(VmState.Phase.RUNNING, "QEMU is running (pid ${pidOf(p)})", profile)
             val code = p.waitFor()
             process = null
+            stopShareServer()
             log.line("QEMU exited with $code")
             if (VmState.phase != VmState.Phase.STOPPED) {
                 if (code == 0) VmState.set(VmState.Phase.STOPPED, "The virtual machine stopped")
@@ -165,6 +169,7 @@ class VmService : Service() {
             log.error("launch failed", t)
             process?.destroy()
             process = null
+            stopShareServer()
             VmState.set(VmState.Phase.FAILED, t.message ?: t.toString())
         } finally {
             launching = false
@@ -202,6 +207,25 @@ class VmService : Service() {
         val servers = (v4.ifEmpty { listOf("1.1.1.1", "8.8.8.8") }) + found.filter { ':' in it }
         store.dnsFile.writeText(servers.joinToString("") { "nameserver $it\n" })
         log.line("DNS for iOS (10.0.2.3 forwards to): ${servers.joinToString(", ")}")
+    }
+
+    @Volatile private var share: ShareServer? = null
+
+    /** Photos shared from Android: iOS Safari opens ShareServer.IOS_URL (no internet needed). */
+    private fun startShareServer(store: Store, log: LaunchLog) {
+        stopShareServer()
+        store.shareDir.mkdirs()
+        try {
+            share = ShareServer(store.shareDir).also { it.start() }
+            log.line("photo sharing for iOS: ${ShareServer.IOS_URL} (${store.shareDir.list()?.size ?: 0} files)")
+        } catch (e: Exception) {
+            log.line("photo sharing not started: ${e.message}")
+        }
+    }
+
+    private fun stopShareServer() {
+        share?.stop()
+        share = null
     }
 
     private fun env(pb: ProcessBuilder, store: Store) {
@@ -253,6 +277,7 @@ class VmService : Service() {
     override fun onDestroy() {
         process?.destroy()
         process = null
+        stopShareServer()
         releaseWakeLock()
         super.onDestroy()
     }

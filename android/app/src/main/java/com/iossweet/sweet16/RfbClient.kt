@@ -81,7 +81,7 @@ class RfbClient(input: InputStream, private val output: OutputStream) {
     }
 
     /** Message loop; blocks until the connection ends. */
-    fun run(listener: Listener, minFrameMs: Long = 16) {
+    fun run(listener: Listener, minFrameMs: Long = 0) {
         listener.onResize(width, height)
         var error: Throwable? = null
         try {

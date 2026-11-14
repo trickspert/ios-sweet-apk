@@ -151,11 +151,19 @@ class VmActivity : Activity() {
                         client = c
                         view.client = c
                         main.post { showStatus(null) }
+                        // Ask for the next update right away: QEMU's VNC server only polls
+                        // the screen every 30 ms while updates are wanted and delivered,
+                        // and backs off (up to 3 s) when a poll finds no client waiting.
                         c.run(object : RfbClient.Listener {
                             override fun onResize(width: Int, height: Int) = view.resize(width, height)
-                            override fun onUpdate(x: Int, y: Int, w: Int, h: Int) = view.damage(x, y, w, h)
+                            override fun onUpdate(x: Int, y: Int, w: Int, h: Int) {
+                                // The kernel flips one bit of the last pixel every vsync to keep
+                                // that polling fast (SweetFramebuffer.cpp heartbeat): no redraw.
+                                if (h == 1 && w <= 16 && y == c.height - 1 && x + w == c.width) return
+                                view.damage(x, y, w, h)
+                            }
                             override fun onClosed(error: Throwable?) {}
-                        }, minFrameMs = 33)
+                        }, minFrameMs = 0)
                     } catch (e: Exception) {
                         // QEMU not ready yet, or it went away
                     }

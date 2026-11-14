@@ -82,7 +82,8 @@ class SettingsActivity : Activity() {
         note("iOS services that only crash and restart without their hardware, comma separated. Empty = start all.")
         switch("Internet for iOS (through this phone's connection)", store.network) { store.network = it }
         note("iOS sees a wired Ethernet connection (not Wi-Fi). Safari and other apps can use the internet.")
-        switch("Show the kernel log on screen while booting", store.showKernelLog) { store.showKernelLog = it }
+        switch("Keep the kernel log on screen over iOS (slower)", store.showKernelLog) { store.showKernelLog = it }
+        note("Off: the log shows while booting and stops when iOS appears (it is always in Kernel log).")
         switch("Phone volume keys control iOS", store.forwardVolumeKeys) { store.forwardVolumeKeys = it }
 
         text("Extra kernel boot-args (advanced)")
@@ -106,6 +107,16 @@ class SettingsActivity : Activity() {
                 .setPositiveButton("Delete") { _, _ -> if (!VmState.active) store.disk.delete(); build() }
                 .setNegativeButton("Cancel", null)
                 .show()
+        }
+
+        section("Photos for iOS")
+        val shared = store.shareDir.listFiles()?.filter { it.isFile } ?: emptyList()
+        text("${shared.size} photo${if (shared.size == 1) "" else "s"} shared (${shared.sumOf { it.length() } shr 20} MB)")
+        note("Main screen ⋮ → Share photos with iOS… adds photos. In iOS Safari open ${ShareServer.IOS_URL}, " +
+            "touch and hold a photo → Add to Photos.")
+        if (shared.isNotEmpty()) button("Remove the shared photos", danger = true) {
+            store.shareDir.listFiles()?.forEach { it.delete() }
+            build()
         }
 
         section("Keep running in the background")

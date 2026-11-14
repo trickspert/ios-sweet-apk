@@ -49,6 +49,11 @@ class Launch private constructor(
                 attachDisk = true
                 words += Store.IOS_BOOT_ARGS.split(' ')
                 if (!store.showKernelLog) words += "sweetfb_noconsole=1"
+                if (store.fastMode) {
+                    words.remove("-enable_kprintf_spam")
+                    words += Store.FAST_BOOT_ARGS
+                    if (store.skipServices.isNotBlank()) words += "sweetnoexec=${store.skipServices}"
+                }
                 words += store.extraBootArgs.split(' ')
                 if (store.userDeviceTree.isFile) apple = store.userDeviceTree.readBytes() // its /product
             } else {

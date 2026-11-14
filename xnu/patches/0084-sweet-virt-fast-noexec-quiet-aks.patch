@@ -1,0 +1,113 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..3456b66 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -35,6 +35,7 @@
+ #include <sys/ubc_internal.h>
+ #include <sys/vnode.h>
+ #include <security/mac_policy.h>
++#include <pexpert/pexpert.h>
+ 
+ /* iokit/Kernel/arm/SweetEntitlements.cpp */
+ void *sweet_entitlements_create(const CS_GenericBlob *blob, size_t blob_len);
+@@ -305,8 +306,64 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 	}
+ }
+ 
++/*
++ * Boot-arg sweetnoexec=name[,name...]: refuse to exec these binaries (by file
++ * name). The sweet-virt machine (Android app) uses it for daemons that only
++ * crash-loop without their hardware (bluetoothd, fairplayd.H2): every respawn
++ * costs seconds of emulated CPU. launchd sees the exec fail and throttles.
++ */
++static char sweet_noexec_names[256];
++static int sweet_noexec_state;          /* 0 unparsed, 1 empty, 2 list */
++static uint32_t sweet_noexec_logged;
++
++static bool
++sweet_noexec_match(const char *name)
++{
++	if (sweet_noexec_state == 0) {
++		sweet_noexec_state = (PE_parse_boot_argn("sweetnoexec", sweet_noexec_names,
++		    sizeof(sweet_noexec_names)) && sweet_noexec_names[0] != 0) ? 2 : 1;
++	}
++	if (sweet_noexec_state != 2 || name == NULL) {
++		return false;
++	}
++	size_t len = strlen(name);
++	const char *p = sweet_noexec_names;
++	while (*p) {
++		const char *end = strchr(p, ',');
++		size_t n = end ? (size_t)(end - p) : strlen(p);
++		if (n == len && strncmp(p, name, n) == 0) {
++			return true;
++		}
++		if (!end) {
++			break;
++		}
++		p = end + 1;
++	}
++	return false;
++}
++
++static int
++sweet_amfi_vnode_check_exec(__unused kauth_cred_t cred, struct vnode *vp,
++    __unused struct vnode *scriptvp, __unused struct label *vnodelabel,
++    __unused struct label *scriptlabel, __unused struct label *execlabel,
++    __unused struct componentname *cnp, __unused u_int *csflags,
++    __unused void *macpolicyattr, __unused size_t macpolicyattrlen)
++{
++	const char *name = vnode_getname(vp);
++	bool blocked = sweet_noexec_match(name);
++	if (blocked && sweet_noexec_logged < 32) {
++		sweet_noexec_logged++;
++		printf("SWEET NOEXEC: %s not started (boot-arg sweetnoexec)\n", name);
++	}
++	if (name != NULL) {
++		vnode_putname(name);
++	}
++	return blocked ? EPERM : 0;
++}
++
+ static const struct mac_policy_ops sweet_amfi_mac_ops = {
+ 	.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,
++	.mpo_vnode_check_exec = sweet_amfi_vnode_check_exec,
+ };
+ 
+ /*
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index d11fe26..ffcecc4 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -24,6 +24,7 @@
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <libkern/c++/OSString.h>
+ #include <sys/proc.h>
++#include <pexpert/pexpert.h>
+ 
+ /* libaks selectors (AppleKeyStore.framework, iOS 16.7). */
+ enum {
+@@ -232,10 +233,19 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		break;
+ 	}
+ 
+-	char name[32];
+-	proc_selfname(name, sizeof(name));
+-	IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
+-	    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	/* One line per call (dasd alone makes hundreds): only with boot-arg sweetakslog=1. */
++	static int aks_log = -1;
++	if (aks_log < 0) {
++		uint32_t on = 0;
++		PE_parse_boot_argn("sweetakslog", &on, sizeof(on));
++		aks_log = on ? 1 : 0;
++	}
++	if (aks_log) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
++		    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	}
+ 	return ret;
+ }
+ #endif /* SWEET */

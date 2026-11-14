@@ -2,6 +2,29 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-14 later: user confirmed fast mode is faster on the S25 Ultra -> merged to main, new release <<<
+- User: "its good now it's faster" (no exact time given). Asked to publish as an update and keep the old
+  releases: android.yml release job makes a new sweet16-build-N tag; older releases are untouched.
+- Still open for the user: delete the draft "Sweet16 test build (run 43638670856)" and the "Sweet16bin"
+  release (it holds DT-d22ap.bin, an Apple file). This session cannot edit/delete releases.
+
+### >>> 2026-11-14 ~21:00 UTC: fast mode (patch 0084) built + verified on PC; NOT yet tried on the phone <<<
+- Commit cabd8b1 (branch only, NOT main): kernel patch 0084 + app "Fast mode" (Settings, default on).
+  Fast mode drops `-enable_kprintf_spam`, adds `telemetry_sample_all_tasks=0 sweetiolog=- sweetsample=-`
+  and `sweetnoexec=bluetoothd,fairplayd.H2` (MAC exec hook in sweet_amfi.c returns EPERM, logs
+  "SWEET NOEXEC: <name> not started"); `sweetakslog=1` brings back the per-call SWEET AKS lines (now off).
+  Default TB cache 512 MB, default 6 vCPUs on 8-core phones.
+- CI android run 43638670856: kernel + apk success (release skipped: branch). Artifacts sit on blob shard
+  productionresultssa13 (not allowed in this environment; user declined adding it), so
+  `.github/workflows/stage-test.yml` (commit 141377c) copies a run's artifacts into a DRAFT release
+  (download via `gh api -H 'Accept: application/octet-stream' .../releases/assets/ID`).
+- PC QEMU 8.2 checks with that kernel (sha256 0ea851a8...db3b, same as in the APK), Developer boot + sweet-sh:
+  `sweetnoexec=launchd` -> "SWEET NOEXEC: launchd not started" then "exec of /sbin/launchd failed, errno 1"
+  (hook works); fast-mode args, 6 CPUs -> `sweet#` in ~32 s, `hw` = hw.ncpu 6, telemetry line now
+  "Sampling tasks" instead of "Sampling all tasks". APK: same signing cert (2caf0585...), versionCode 456290.
+- Unverified: iOS-disk boot time on the S25 with fast mode (needs the user's phone). Merge/release only
+  after the user confirms. PR #5 (same branch) now also contains these commits.
+
 ### >>> 2026-11-14: second boot on the S25 Ultra reaches the lock screen in ~4 minutes <<<
 User confirms in Sweet16: leaving apps works (swipe-up home gesture) and gestures work. README updated (also
 removed the stale "cannot leave an app" line from the Redmi section; fixed there by 0070/0071).

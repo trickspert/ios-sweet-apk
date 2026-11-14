@@ -46,6 +46,12 @@ class Store(private val context: Context) {
     var cores: Int
         get() = int("cores", defaultCores())
         set(v) = prefs.edit().putInt("cores", v.coerceIn(1, 8)).apply()
+    var fastMode: Boolean
+        get() = bool("fast_mode", true)
+        set(v) = prefs.edit().putBoolean("fast_mode", v).apply()
+    var skipServices: String
+        get() = str("skip_services", DEFAULT_SKIP_SERVICES)
+        set(v) = prefs.edit().putString("skip_services", v.replace(" ", "")).apply()
     var showKernelLog: Boolean
         get() = bool("kernel_log", true)
         set(v) = prefs.edit().putBoolean("kernel_log", v).apply()
@@ -56,7 +62,7 @@ class Store(private val context: Context) {
         get() = str("boot_args", "")
         set(v) = prefs.edit().putString("boot_args", v.trim()).apply()
     var tbSizeMb: Int
-        get() = int("tb_size", 256)
+        get() = int("tb_size", 512)
         set(v) = prefs.edit().putInt("tb_size", v.coerceIn(64, 1024)).apply()
     var ramMb: Int
         get() = int("ram_mb", 4096)
@@ -165,7 +171,18 @@ class Store(private val context: Context) {
     fun qemuBinary(): File = File(nativeLibDir(), "libqemu.so")
 
     companion object {
-        fun defaultCores(): Int = Runtime.getRuntime().availableProcessors().let { (it / 2).coerceIn(1, 4) }
+        /** 6 of 8 cores on big phones (two left for Android, QEMU's I/O and the UI), else half. */
+        fun defaultCores(): Int = Runtime.getRuntime().availableProcessors().let { if (it >= 8) 6 else (it / 2).coerceIn(1, 4) }
+
+        /** Daemons that only crash-loop without their hardware in the VM (kernel boot-arg sweetnoexec). */
+        const val DEFAULT_SKIP_SERVICES = "bluetoothd,fairplayd.H2"
+
+        /**
+         * Fast mode: switch off what costs emulated CPU but only helps debugging. A DEVELOPMENT
+         * kernel samples every thread once per second (telemetry); the IOKit trace and the
+         * SpringBoard/backboardd stack sampler are bring-up diagnostics.
+         */
+        val FAST_BOOT_ARGS = listOf("telemetry_sample_all_tasks=0", "sweetiolog=-", "sweetsample=-")
 
         /** Developer boot default: verbose kernel, console on the PL011, RAM disk root. */
         const val DEV_BOOT_ARGS = "-v debug=0xc serial=3 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0"

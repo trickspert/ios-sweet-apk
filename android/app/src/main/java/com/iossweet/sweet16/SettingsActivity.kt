@@ -69,6 +69,17 @@ class SettingsActivity : Activity() {
             })
         })
 
+        switch("Fast mode (less kernel logging and sampling)", store.fastMode) { store.fastMode = it }
+        note("Turns off debugging work that slows the emulator. Turn it off only to collect detailed logs.")
+        text("Services not started (fast mode)")
+        list.addView(EditText(this).apply {
+            setText(store.skipServices)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setTextColor(Color.WHITE)
+            hint = Store.DEFAULT_SKIP_SERVICES
+            setOnFocusChangeListener { _, has -> if (!has) store.skipServices = text.toString() }
+        })
+        note("iOS services that only crash and restart without their hardware, comma separated. Empty = start all.")
         switch("Show the kernel log on screen while booting", store.showKernelLog) { store.showKernelLog = it }
         switch("Phone volume keys control iOS", store.forwardVolumeKeys) { store.forwardVolumeKeys = it }
 

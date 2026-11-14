@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
-index 60627ab..e3f5962 100644
+index 60627ab..a4fdaa0 100644
 --- a/bsd/dev/sweet_virtio.c
 +++ b/bsd/dev/sweet_virtio.c
 @@ -22,6 +22,10 @@
@@ -52,7 +52,7 @@ index 60627ab..e3f5962 100644
  #define VIRTIO_ID_INPUT         18
  #define VIRTIO_F_VERSION_1_HI   (1u << 0)       /* feature bit 32 */
  #define VIRTIO_BLK_F_FLUSH      (1u << 9)
-@@ -649,4 +671,347 @@ sweet_virt_start(void)
+@@ -649,4 +671,428 @@ sweet_virt_start(void)
  	printf("SWEET VIRT: %u input device(s), console on %s\n", vi_count,
  	    vt.uart ? "PL011" : "nothing");
  }
@@ -86,7 +86,80 @@ index 60627ab..e3f5962 100644
 +	uint8_t mac[ETHER_ADDR_LEN];
 +	uint32_t busy;          /* polls left at the fast rate */
 +	uint64_t rx_frames, tx_frames, tx_drops;
++	uint32_t seen;          /* VN_SEEN_* milestones already logged */
++	uint32_t ipv4;          /* en0's address as last logged */
 +} vn;
++
++/*
++ * Bring-up milestones, logged once each to the kernel console (Kernel log
++ * > Copy log in the app): did iOS ask for DHCP, get an answer, resolve a
++ * name, open a TCP connection?
++ */
++#define VN_SEEN_DHCP_OUT        1u
++#define VN_SEEN_DHCP_IN         2u
++#define VN_SEEN_DNS_OUT         4u
++#define VN_SEEN_DNS_IN          8u
++#define VN_SEEN_TCP_OUT         16u
++#define VN_SEEN_TCP_IN          32u
++
++static void
++vnet_note(const uint8_t *f, uint32_t len, bool out)
++{
++	if (len < 14 + 20 + 4 || f[12] != 0x08 || f[13] != 0x00) {
++		return;
++	}
++	const uint8_t *ip = f + 14;
++	uint32_t ihl = (ip[0] & 15u) * 4;
++	if ((ip[0] >> 4) != 4 || ihl < 20 || len < 14 + ihl + 4) {
++		return;
++	}
++	const uint8_t *l4 = ip + ihl;
++	uint16_t sport = (uint16_t)((l4[0] << 8) | l4[1]), dport = (uint16_t)((l4[2] << 8) | l4[3]);
++	uint32_t bit = 0;
++	const char *what = NULL;
++	if (ip[9] == 17 && out && dport == 67) {
++		bit = VN_SEEN_DHCP_OUT; what = "iOS sent its first DHCP request";
++	} else if (ip[9] == 17 && !out && dport == 68) {
++		bit = VN_SEEN_DHCP_IN; what = "first DHCP answer from QEMU";
++	} else if (ip[9] == 17 && out && dport == 53) {
++		bit = VN_SEEN_DNS_OUT; what = "iOS sent its first DNS query";
++	} else if (ip[9] == 17 && !out && sport == 53) {
++		bit = VN_SEEN_DNS_IN; what = "first DNS answer";
++	} else if (ip[9] == 6 && len < 14 + ihl + 14) {
++		return;
++	} else if (ip[9] == 6 && out && (l4[13] & 0x12) == 0x02) {
++		bit = VN_SEEN_TCP_OUT; what = "iOS opened its first TCP connection";
++	} else if (ip[9] == 6 && !out && (l4[13] & 0x12) == 0x12) {
++		bit = VN_SEEN_TCP_IN; what = "first TCP connection accepted";
++	}
++	if (bit && !(vn.seen & bit)) {
++		vn.seen |= bit;
++		printf("SWEET NET: %s (%u.%u.%u.%u:%u -> %u.%u.%u.%u:%u)\n", what,
++		    ip[12], ip[13], ip[14], ip[15], sport, ip[16], ip[17], ip[18], ip[19], dport);
++	}
++}
++
++/* Log en0's IPv4 address when it changes (DHCP from configd, or sweetnet=2). */
++static void
++vnet_check_address(void)
++{
++	ifaddr_t *addrs = NULL;
++	uint32_t a = 0;
++	if (ifnet_get_address_list_family(vn.ifp, &addrs, AF_INET) == 0 && addrs != NULL) {
++		if (addrs[0] != NULL) {
++			struct sockaddr_in sin;
++			if (ifaddr_address(addrs[0], (struct sockaddr *)&sin, sizeof(sin)) == 0) {
++				a = ntohl(sin.sin_addr.s_addr);
++			}
++		}
++		ifnet_free_address_list(addrs);
++	}
++	if (a != vn.ipv4) {
++		vn.ipv4 = a;
++		printf("SWEET NET: en0 IPv4 address %u.%u.%u.%u (rx %llu, tx %llu frames)\n",
++		    a >> 24, (a >> 16) & 255, (a >> 8) & 255, a & 255, vn.rx_frames, vn.tx_frames);
++	}
++}
 +static int vn_chan;
 +
 +static void
@@ -127,6 +200,7 @@ index 60627ab..e3f5962 100644
 +				memcpy(mbuf_data(m), (const void *)(vn.rxbuf + (vm_offset_t)id * VNET_BUF + VNET_HDR), flen);
 +				mbuf_setlen(m, flen);
 +				mbuf_pkthdr_setlen(m, flen);
++				vnet_note((const uint8_t *)mbuf_data(m), flen, false);
 +				bpf_tap_in(vn.ifp, DLT_EN10MB, m, NULL, 0);
 +				void *frame_header = mbuf_data(m);
 +				mbuf_pkthdr_setrcvif(m, vn.ifp);
@@ -183,6 +257,7 @@ index 60627ab..e3f5962 100644
 +	vm_offset_t buf = vn.txbuf + (vm_offset_t)id * VNET_BUF;
 +	bzero((void *)buf, VNET_HDR);
 +	mbuf_copydata(m, 0, len, (void *)(buf + VNET_HDR));
++	vnet_note((const uint8_t *)(buf + VNET_HDR), (uint32_t)len, true);
 +	struct vdesc *d = vq_desc(&vn.txq, id);
 +	d->addr = vn.txbuf_pa + (uint64_t)id * VNET_BUF;
 +	d->len = (uint32_t)(VNET_HDR + len);
@@ -243,7 +318,13 @@ index 60627ab..e3f5962 100644
 +static void
 +vnet_thread(__unused void *arg, __unused wait_result_t wr)
 +{
++	uint64_t next_check = 0, period;
++	nanoseconds_to_absolutetime(2 * NSEC_PER_SEC, &period);
 +	for (;;) {
++		if (mach_absolute_time() >= next_check) {
++			vnet_check_address();
++			next_check = mach_absolute_time() + period;
++		}
 +		unsigned n = vnet_rx();
 +		lck_mtx_lock(vn.lock);
 +		vnet_tx_reclaim_locked();

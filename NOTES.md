@@ -4,6 +4,7 @@
 
 ### >>> 2026-11-14 later: user confirmed fast mode is faster on the S25 Ultra -> merged to main, new release <<<
 - User: "its good now it's faster" (no exact time given). Asked to publish as an update and keep the old
+- PR #6 merged (f1d603f); android run 43641623387 all green -> release sweet16-build-19 (APK + boot bundle).
   releases: android.yml release job makes a new sweet16-build-N tag; older releases are untouched.
 - Still open for the user: delete the draft "Sweet16 test build (run 43638670856)" and the "Sweet16bin"
   release (it holds DT-d22ap.bin, an Apple file). This session cannot edit/delete releases.

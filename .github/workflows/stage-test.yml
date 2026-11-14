@@ -1,0 +1,43 @@
+name: stage-test
+
+# Testing aid: copies the artifacts of one android.yml run into a DRAFT
+# release (visible only to the repository's maintainers, no tag is created)
+# so a build can be downloaded and tried before anything is published.
+
+on:
+  push:
+    branches: ["claude/**"]
+    paths: [".github/workflows/stage-test.yml"]
+
+env:
+  RUN_ID: "43638670856"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ github.token }}
+          path: art
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          find art -type f -exec ls -l {} +
+          mkdir up
+          i=0
+          find art -type f | while read -r f; do
+            d=$(basename "$(dirname "$f")"); b=$(basename "$f")
+            cp "$f" "up/${d}__${b}"
+          done
+          ls -l up
+          gh release create "sweet16-test-$RUN_ID" up/* --repo "$GITHUB_REPOSITORY" \
+            --draft --prerelease --target "$GITHUB_SHA" \
+            --title "Sweet16 test build (run $RUN_ID, not published)" \
+            --notes "Draft for testing only. Built by android.yml run $RUN_ID."

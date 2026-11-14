@@ -58,7 +58,7 @@ It starts a small Ubuntu VM (an unrooted phone can't mount disk images, the VM c
 
 ### 4. Start iOS 16
 
-Tap **Start**. You see the Apple logo for a long time (about an hour on the first boot), possibly a black screen, then the lock screen. Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
+Tap **Start**. You see the Apple logo for a long time on the first boot (about an hour, while iOS sets itself up), possibly a black screen, then the lock screen. Later boots are much faster: about 4 minutes on a Galaxy S25 Ultra. Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
 
 ### What works in Sweet16 (2026-11-13)
 
@@ -67,7 +67,7 @@ Tap **Start**. You see the Apple logo for a long time (about an hour on the firs
 | Kernel | XNU boots on 4 virtual CPUs, kernel console on the serial port |
 | iOS userland | launchd, the system daemons, backboardd, SpringBoard |
 | Screen | Apple logo, **lock screen**, **Control Center**, **home screen**, the **Settings** app (iOS draws at 1125×2436, shown at half size) |
-| Input | Touch and swipes (virtual tablet), Home, Lock and volume buttons |
+| Input | Touch and iOS gestures: swipe up to unlock and to leave apps (back to the home screen), app switcher, Control Center; Home, Lock and volume buttons |
 | Not working | Internet / Wi-Fi, sound, camera, GPS, Bluetooth, App Store, GPU; the date shows Dec 31 (no clock chip yet) |
 
 ### How Sweet16 works
@@ -109,7 +109,6 @@ On the Redmi Note 10 Pro (`sweet`, Snapdragon 732G) iOS 16 boots directly on the
 
 ### What does not work (yet)
 
-- **Navigation:** you cannot leave an app (the home gesture and AssistiveTouch Home do nothing yet).
 - **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.** Daemons for them start and fail or keep relaunching.
 - **No GPU.** Everything is drawn by the CPU at roughly 20–30 fps. The two Cortex-A76 cores are not used yet.
 - **Few apps.** The image has only what is on the system volume. There is no App Store, no Apple ID, and some Settings pages are empty.

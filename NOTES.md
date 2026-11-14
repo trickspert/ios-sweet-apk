@@ -3,6 +3,8 @@
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> 2026-11-14: second boot on the S25 Ultra reaches the lock screen in ~4 minutes <<<
+User confirms in Sweet16: leaving apps works (swipe-up home gesture) and gestures work. README updated (also
+removed the stale "cannot leave an app" line from the Redmi section; fixed there by 0070/0071).
 After the first boot (~1 h: datamigrator, caches), a cold boot took about 4 minutes to a working iOS (same
 black phase with identityservicesd Skywalk `SK[n]: __nexus_register ... nxprov_create: 1` lines before it).
 

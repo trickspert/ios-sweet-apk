@@ -28,6 +28,15 @@
   rendering at @2x would need MobileGestalt cache changes (main-screen-*), not attempted blind. Shared-memory
   display (QEMU memory-backend-memfd is in the Termux build) could replace VNC later.
 - Commit eac7f14, CI android run 43650636850, stage-test updated (9eeb909).
+- First 0086 kernel: heartbeat XOR bit cancelled out (two 60 Hz flips per 30 ms poll): 81 ms / 333 ms / none.
+  Fixed (95ab27d): 16-step counter in the low 2 bits of blue+green. CI run 43652199195 (kernel 07f806a7...,
+  APK versionCode 456447, same cert). PC re-test, 5 trials after 8 s idle: change visible after 8-42 ms,
+  steady 200 updates / 6 s. nettest (sweetnet=2) on 0086: date, DNS answer, HTTP 200 5 MB OK.
+- Test pitfall: a client connected to serial.sock that never reads stalls QEMU (PL011 writes 1 byte per
+  skb, the unix socket fills after a few hundred bytes, the vCPU blocks with the BQL) - looked like a guest
+  hang after the 3rd command. The app's ConsoleActivity drains it while open and disconnects on pause.
+- APK sent as Sweet16-internet-smooth-photos-test.apk. Unverified on the phone: configd DHCP on en0 (look for
+  "SWEET NET: IONetworkStack naming request" / "iOS sent its first DHCP request" / "en0 IPv4 address").
 
 ### >>> 2026-11-14 ~22:30 UTC: date/time + internet (patch 0085) - CI building, untested on the phone <<<
 - User tested Safari: it opens (Favorites page, blank apple.com without network). Asked for Wi-Fi + date/time.

@@ -58,7 +58,7 @@ It starts a small Ubuntu VM (an unrooted phone can't mount disk images, the VM c
 
 ### 4. Start iOS 16
 
-Tap **Start**. You see the Apple logo for a long time (about an hour on the first boot), possibly a black screen, then the lock screen. Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
+Tap **Start**. You see the Apple logo for a long time on the first boot (about an hour, while iOS sets itself up), possibly a black screen, then the lock screen. Later boots are much faster: about 4 minutes on a Galaxy S25 Ultra. Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
 
 ### What works in Sweet16 (2026-11-13)
 

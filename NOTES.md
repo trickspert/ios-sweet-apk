@@ -2,6 +2,10 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-14: second boot on the S25 Ultra reaches the lock screen in ~4 minutes <<<
+After the first boot (~1 h: datamigrator, caches), a cold boot took about 4 minutes to a working iOS (same
+black phase with identityservicesd Skywalk `SK[n]: __nexus_register ... nxprov_create: 1` lines before it).
+
 ### >>> 2026-11-13 later: HOME SCREEN + SETTINGS APP in Sweet16 on the S25 Ultra <<<
 User unlocked and opened Settings (android/docs/s25-settings.jpg). PR #3 merged into main (f3597cc). The user had
 manually published a release "Sweet16 device tree" with DT-d22ap.bin (Apple data) and was asked to delete it;

@@ -80,6 +80,8 @@ class SettingsActivity : Activity() {
             setOnFocusChangeListener { _, has -> if (!has) store.skipServices = text.toString() }
         })
         note("iOS services that only crash and restart without their hardware, comma separated. Empty = start all.")
+        switch("Internet for iOS (through this phone's connection)", store.network) { store.network = it }
+        note("iOS sees a wired Ethernet connection (not Wi-Fi). Safari and other apps can use the internet.")
         switch("Show the kernel log on screen while booting", store.showKernelLog) { store.showKernelLog = it }
         switch("Phone volume keys control iOS", store.forwardVolumeKeys) { store.forwardVolumeKeys = it }
 

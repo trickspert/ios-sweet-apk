@@ -31,6 +31,12 @@ class Store(private val context: Context) {
     val qemuDebugLog = File(files, "qemu-debug.log")
     val lastLaunch = File(files, "last-launch.txt")
     val launchLog = File(files, "launch.log")
+    /**
+     * Nameservers for QEMU's user networking: the APK's libslirp reads this path
+     * (/data/data/com.iossweet.sweet16/files/dns, patched in by
+     * android/tools/fetch-termux-qemu.py instead of Termux's resolv.conf).
+     */
+    val dnsFile = File(files, "dns")
     val bootDir = File(context.cacheDir, "boot")
     val selftestRamdisk = File(files, "sweet-sh")
     val vncSocket = File(context.cacheDir, "vnc.sock")
@@ -52,6 +58,10 @@ class Store(private val context: Context) {
     var skipServices: String
         get() = str("skip_services", DEFAULT_SKIP_SERVICES)
         set(v) = prefs.edit().putString("skip_services", v.replace(" ", "")).apply()
+    /** iOS gets internet through this phone (virtio-net + QEMU user networking). */
+    var network: Boolean
+        get() = bool("network", true)
+        set(v) = prefs.edit().putBoolean("network", v).apply()
     var showKernelLog: Boolean
         get() = bool("kernel_log", true)
         set(v) = prefs.edit().putBoolean("kernel_log", v).apply()

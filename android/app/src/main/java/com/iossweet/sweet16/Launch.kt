@@ -103,6 +103,11 @@ class Launch private constructor(
                 "-device", "virtio-tablet-device",
                 "-device", "virtio-keyboard-device",
             )
+            if (store.network) {
+                // NAT through the phone's connection: DHCP gives iOS 10.0.2.15, router
+                // 10.0.2.2, DNS 10.0.2.3 (forwarded to the nameservers in Store.dnsFile).
+                a += listOf("-netdev", "user,id=net0,ipv6=off", "-device", "virtio-net-device,netdev=net0")
+            }
             if (disk) {
                 a += listOf("-drive", "if=none,id=root,file=${store.disk.path},format=raw,cache=writeback,aio=threads",
                     "-device", "virtio-blk-device,drive=root")

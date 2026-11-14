@@ -126,6 +126,7 @@ class VmService : Service() {
             store.serialSocket.delete()
             store.consoleLog.delete()
             store.qemuDebugLog.delete()
+            if (store.network) writeDnsServers(store, log)
             // Exactly what runs, for "Boot details" and bug reports.
             store.lastLaunch.writeText(launch.describe(store))
             val args = launch.args
@@ -181,6 +182,26 @@ class VmService : Service() {
     private fun signalName(code: Int): String = when (code) {
         134 -> " (SIGABRT)"; 135 -> " (SIGBUS)"; 137 -> " (SIGKILL)"; 139 -> " (SIGSEGV)"; 159 -> " (SIGSYS: seccomp)"
         else -> if (code > 128) " (signal ${code - 128})" else ""
+    }
+
+    /**
+     * The phone's current DNS servers for QEMU's DNS forwarder (libslirp uses the
+     * first IPv4 one; public resolvers if the phone reports none).
+     */
+    private fun writeDnsServers(store: Store, log: LaunchLog) {
+        val found = mutableListOf<String>()
+        try {
+            val cm = getSystemService(android.net.ConnectivityManager::class.java)
+            cm.getLinkProperties(cm.activeNetwork)?.dnsServers?.forEach { a ->
+                a.hostAddress?.substringBefore('%')?.let { found += it }
+            }
+        } catch (e: Exception) {
+            log.line("DNS servers: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        val v4 = found.filter { ':' !in it }
+        val servers = (v4.ifEmpty { listOf("1.1.1.1", "8.8.8.8") }) + found.filter { ':' in it }
+        store.dnsFile.writeText(servers.joinToString("") { "nameserver $it\n" })
+        log.line("DNS for iOS (10.0.2.3 forwards to): ${servers.joinToString(", ")}")
     }
 
     private fun env(pb: ProcessBuilder, store: Store) {

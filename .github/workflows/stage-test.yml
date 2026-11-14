@@ -10,7 +10,7 @@ on:
     paths: [".github/workflows/stage-test.yml"]
 
 env:
-  RUN_ID: "43638670856"
+  RUN_ID: "43646191543"
 
 permissions:
   contents: write
@@ -19,7 +19,18 @@ permissions:
 jobs:
   stage:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     steps:
+      - name: Wait for the android run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while :; do
+            s=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.status + " " + (.conclusion // "")')
+            echo "$s"
+            case "$s" in completed*) break;; esac
+            sleep 60
+          done
       - uses: actions/download-artifact@v4
         with:
           run-id: ${{ env.RUN_ID }}

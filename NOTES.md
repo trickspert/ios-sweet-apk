@@ -25,9 +25,15 @@
   tools/xnu-cc.py works with Ubuntu clang 18 (XNU_CC_CLANG=/usr/bin/clang) on the CI buildtree + job log.
 - Commits 095160b (0085 + app), da3ad0a (milestone logs); CI android run 43646191543; stage-test run
   43646259120 waits for it and copies artifacts into a draft release (this session cannot delete releases).
-- Next: download kernel, Developer boot nettest with sweetnet=2 (expect real date, DNS answer, HTTP 200 from
-  python -m http.server 8080 on the host via 10.0.2.2), then send the APK. Unknown until the phone test:
-  whether configd picks en0 up (if not: check the milestone lines; DHCP request missing = configd side).
+- CI run 43646191543 green (kernel sha256 5cefa262...; APK versionCode 456377, same cert, INTERNET +
+  ACCESS_NETWORK_STATE, libslirp path patched). PC QEMU 8.2 results with that kernel:
+  - nettest + sweetnet=2: "SWEET RTC: PL031 ... UTC 1794694785", nettest time 2026-11-14 22:19:46 UTC (= host),
+    userland at 1.0 s instead of 31 s; DNS query/answer through 10.0.2.3 (rcode 3 only because this sandbox has
+    no outside DNS); HTTP via 10.0.2.2:8080 200 OK, 5,000,206 bytes in ~1.0 s (4 vCPUs), no panic.
+  - sweet-sh + default sweetnet=1 + fast-mode args, 6 vCPUs: `sweet#` at 0.9 s (was 32 s), en0 attached +
+    "published in IOKit". Kernel prints "skip attaching fsw to en0 using legacy TX model" (Skywalk; harmless).
+- APK sent to the user as Sweet16-internet-clock-test.apk. NOT verified yet: iOS (configd) DHCP on en0, Safari.
+  If it fails, ask for Copy log and look for the SWEET NET milestone lines.
 
 ### >>> 2026-11-14 later: user confirmed fast mode is faster on the S25 Ultra -> merged to main, new release <<<
 - User: "its good now it's faster" (no exact time given). Asked to publish as an update and keep the old

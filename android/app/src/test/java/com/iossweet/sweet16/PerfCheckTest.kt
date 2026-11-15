@@ -12,5 +12,6 @@ class PerfCheckTest {
         assertTrue(r, r.contains("  80%  backboardd"))
         assertTrue(r, r.contains("  25%  mds"))
         assertTrue(r, r.contains("160% of 600%"))
+        assertTrue(PerfCheck.report("SWEET TOP 10s:  1% total 1%", 6).contains("kernel"))
     }
 }

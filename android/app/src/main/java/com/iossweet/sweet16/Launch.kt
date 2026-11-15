@@ -73,9 +73,13 @@ class Launch private constructor(
             // lock timeouts. Android can pause a virtual CPU for a second while it holds a
             // spinlock; XNU's defaults (0.25 s / 0.125 s ticket locks) then panic:
             // "Ticket spinlock ... timeout after 52286220 ticks" on a Galaxy S25 Ultra.
-            val owned = listOf("cpus=", "sweetfb_scale=", "slto_us=", "tlto_us=", "sweetfb_scanout=")
+            // interrupt-masked-debug-mode=0: the DEVELOPMENT kernel panics when interrupts stay
+            // masked > 35 ms ("Processing of an interrupt ... took 15932560 ns"), which
+            // happens whenever the host pauses a virtual CPU; seen on PC at 6 vCPUs on 4 cores.
+            val owned = listOf("cpus=", "sweetfb_scale=", "slto_us=", "tlto_us=", "sweetfb_scanout=", "interrupt-masked-debug-mode=")
             val line = words.filter { w -> w.isNotBlank() && owned.none { w.startsWith(it) } } +
-                listOf("cpus=$cores", "sweetfb_scale=2", "slto_us=$LOCK_TIMEOUT_US", "tlto_us=$LOCK_TIMEOUT_US") +
+                listOf("cpus=$cores", "sweetfb_scale=2", "slto_us=$LOCK_TIMEOUT_US", "tlto_us=$LOCK_TIMEOUT_US",
+                    "interrupt-masked-debug-mode=0") +
                 (if (store.directDisplay) listOf("sweetfb_scanout=1") else emptyList())
             val image = BootBuilder.build(
                 BootBuilder.Plan(store.kernelBytes(), store.ramMb, line.joinToString(" "), adtMode, apple, ramdisk),

@@ -6,7 +6,7 @@ package com.iossweet.sweet16
  * processes use the emulated CPUs. No Android dependencies.
  */
 object PerfCheck {
-    private val entry = Regex("""(\S+) (\d+)%""")
+    private val entry = Regex("""(\S*) (\d+)%""")
 
     fun report(console: String, cores: Int, samples: Int = 6): String {
         val lines = console.lineSequence().filter { it.contains("SWEET TOP ") }.toList().takeLast(samples)
@@ -15,7 +15,7 @@ object PerfCheck {
         var total = 0
         for (l in lines) {
             val body = l.substringAfter("s:").substringBefore(" total ")
-            for (m in entry.findAll(body)) sum.merge(m.groupValues[1], m.groupValues[2].toInt(), Int::plus)
+            for (m in entry.findAll(body)) sum.merge(m.groupValues[1].ifEmpty { "kernel" }, m.groupValues[2].toInt(), Int::plus)
             total += l.substringAfter(" total ").trim().removeSuffix("%").toIntOrNull() ?: 0
         }
         val n = lines.size

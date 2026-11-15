@@ -2,6 +2,25 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-15 ~00:30 UTC: 0086 on the phone: Safari still loads nothing (no log given); 0087 + app <<<
+- User: Safari still loads nothing; asked for Notes app, Wi-Fi, "reverse engineered hardware acceleration",
+  a real photo importer. Still no kernel log from the phone (asked repeatedly), so this round adds
+  self-diagnosis and fallbacks:
+  - 0087 (sweet_virtio.c): fallback after sweetnetwait s (default 300, 0 = off, sweetnet=2 disables) with no
+    IPv4 on en0: kernel 10.0.2.15/24 + default route via 10.0.2.2 (rtrequest RTM_ADD, like netboot.c). Logs
+    "SWEET NET: <proc> turned en0 on" (SIOCSIFFLAGS) and "<proc> opened IONetworkStack" (SweetNet.cpp).
+    Existing Redmi-era logs also show "SWEET NET: <proc> en0 add address" (in.c) and "<proc> route add"
+    (rtsock.c).
+  - App: NetCheck.kt/NetCheckDialog.kt "Internet check" (main menu, VM handle, console): checklist from
+    the SWEET NET lines + UDP DNS probe from the phone to the nameserver in files/dns. JVM tests.
+  - Notes: no native iOS app can be built/installed here; NotesPage.kt = a home-screen web app at
+    http://10.0.2.2:16016/notes (Add to Home Screen), localStorage + POST /api/notes -> files/notes.json.
+    Checked in Playwright (iPhone X emulation): create/edit/list, reload, fresh browser loads from server.
+  - Not attempted: GPU acceleration (no virtual GPU path for CoreAnimation); @2x rendering (MobileGestalt
+    cache) - only after networking/logs work. Photo import into the Photos library without iOS networking
+    (kernel writing DCIM + rebuilding Photos.sqlite) judged too risky blind.
+- Commit 44ae365, CI run 43657614122, stage-test e56cd16.
+
 ### >>> 2026-11-14 ~23:30 UTC: phone test of 0085: no internet; 0086 = configd fix + VNC heartbeat + photo sharing <<<
 - User (S25): "nothing loads after 5 mins"; display 3-12 fps; asked for >=30 Hz, wallpaper/photos, Notes app.
   No log yet (asked for Copy log + home-screen screenshot).

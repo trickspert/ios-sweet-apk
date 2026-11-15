@@ -71,6 +71,14 @@ class Store(private val context: Context) {
      * screen while booting and then only in Kernel log (each new line scrolled the
      * whole framebuffer, over the GUI, costing emulated CPU).
      */
+    /**
+     * Direct display: QEMU's RAM in a memfd the app maps; iOS's frames are read from
+     * guest memory (no copy in the guest, every frame, full resolution) and scaled by
+     * the phone's GPU. Off: the VNC picture (half resolution) as before.
+     */
+    var directDisplay: Boolean
+        get() = bool("direct_display", true)
+        set(v) = prefs.edit().putBoolean("direct_display", v).apply()
     var showKernelLog: Boolean
         get() = bool("kernel_log_over_ios", false)
         set(v) = prefs.edit().putBoolean("kernel_log_over_ios", v).apply()

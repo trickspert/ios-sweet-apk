@@ -1,0 +1,259 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 75a74f1..93fcb23 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -38,6 +38,7 @@
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ extern "C" int sweet_virt_present(void); /* bsd/dev/sweet_virtio.c */
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -84,6 +85,32 @@ enum {
+  * and frames are downsampled (nearest pixel) when shown. QEMU's VNC server
+  * takes at most 2160 rows, and the smaller copy is cheaper in emulation.
+  */
++/*
++ * Direct display (boot-arg sweetfb_scanout=1, sweet-virt with QEMU's guest
++ * RAM in a memfd the Android app maps): instead of copying each frame into
++ * the panel, the kernel describes where the frame is in guest physical
++ * memory and the app reads it straight from RAM and scales it on the
++ * phone's GPU. The descriptor sits in the reserved framebuffer region,
++ * 0x1600000 bytes after the panel (VirtAdt.FB .. FB + FB_SIZE):
++ *
++ *   0x00 u32 magic 'S16D'    0x04 u32 version 1
++ *   0x08 u32 seq: odd while being written, read again after copying
++ *   0x0c u32 width  0x10 u32 height  0x14 u32 bytes per row
++ *   0x18 u32 pixel format ('BGRA')   0x1c u32 number of runs
++ *   0x20 u64 byte offset of pixel (0,0) in the runs   0x28 u64 total bytes
++ *   0x30 u32 kind: 1 = the panel (the copied frame), 2 = iOS's own surface
++ *   0x40 runs: { u64 physical address, u64 length } x number of runs
++ *
++ * A single full-screen layer (what backboardd presents) is shown in place
++ * (kind 2, no copy at all: more CPU for iOS, every frame, full 1125x2436);
++ * anything else is copied to the panel as before and described as kind 1.
++ */
++#define SWEET_SCANOUT_OFFSET            0x1600000
++#define SWEET_SCANOUT_SIZE              0x100000
++#define SWEET_SCANOUT_MAGIC             0x44363153      /* 'S16D' */
++#define SWEET_SCANOUT_MAX_RUNS          4096
++#define SWEET_SCANOUT_CACHE             4
++
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
+@@ -124,6 +151,21 @@ public:
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	volatile uint8_t *fScanout;   /* direct display descriptor (sweetfb_scanout) */
++	uint32_t      fScanSeq;
++	uint32_t      fScanKind;
++	uint32_t      fScanID;
++	struct {
++		uint32_t  id, n;
++		uint64_t *runs;
++	} fScanCache[SWEET_SCANOUT_CACHE];
++	uint32_t      fScanNext;
++	uint32_t      fScanLogged;
++
++	void scanoutPublish(uint32_t kind, uint32_t id, uint32_t w, uint32_t h, uint32_t bpr, uint32_t fmt,
++	    uint64_t offset, uint64_t total, const uint64_t *runs, uint32_t nruns);
++	void scanoutPanel(void);
++	bool scanoutSurface(SweetSurface *s);
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -210,6 +252,21 @@ AppleCLCD::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_heartbeat", &heartbeat, sizeof(heartbeat));
+ 	fHeartbeat = heartbeat != 0 && fWidth > 0 && fHeight > 0;
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++	uint32_t scanout = 0;
++	PE_parse_boot_argn("sweetfb_scanout", &scanout, sizeof(scanout));
++	if (scanout && sweet_virt_present()) {
++		vm_offset_t d = ml_io_map((vm_offset_t)(fPhys + SWEET_SCANOUT_OFFSET), SWEET_SCANOUT_SIZE);
++		if (d != 0) {
++			fScanout = (volatile uint8_t *)d;
++			/* Nothing is copied for the usual frame: show every one. */
++			fFlushTicks = 1;
++			scanoutPanel();
++			*(volatile uint32_t *)(fScanout + 4) = 1;
++			__builtin_arm_dmb(0xf);
++			*(volatile uint32_t *)fScanout = SWEET_SCANOUT_MAGIC;
++			IOLog("SWEET FB: direct display descriptor at 0x%llx\n", fPhys + SWEET_SCANOUT_OFFSET);
++		}
++	}
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -257,6 +314,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
+ 	}
+ 	if (fb->fPowerOff) {
++		if (fb->fScanout != NULL && fb->fScanKind != 1) {
++			fb->scanoutPanel();
++		}
+ 		/* Fade out: halve every channel each vsync, then black, then idle. */
+ 		uint32_t step = fb->fFadeStep;
+ 		if (step <= 6) {
+@@ -340,11 +400,149 @@ AppleCLCD::swap(const uint8_t *rec)
+ 	}
+ }
+ 
++void
++AppleCLCD::scanoutPublish(uint32_t kind, uint32_t id, uint32_t w, uint32_t h, uint32_t bpr, uint32_t fmt,
++    uint64_t offset, uint64_t total, const uint64_t *runs, uint32_t nruns)
++{
++	volatile uint32_t *d32 = (volatile uint32_t *)fScanout;
++	volatile uint64_t *d64 = (volatile uint64_t *)fScanout;
++	uint32_t seq = fScanSeq + 1;    /* odd: being written */
++
++	d32[2] = seq;
++	__builtin_arm_dmb(0xf);
++	d32[3] = w;
++	d32[4] = h;
++	d32[5] = bpr;
++	d32[6] = fmt;
++	d32[7] = nruns;
++	d64[4] = offset;
++	d64[5] = total;
++	d32[12] = kind;
++	for (uint32_t i = 0; i < 2 * nruns; i++) {
++		d64[8 + i] = runs[i];
++	}
++	__builtin_arm_dmb(0xf);
++	fScanSeq = seq + 1;
++	d32[2] = fScanSeq;
++	fScanKind = kind;
++	fScanID = id;
++}
++
++void
++AppleCLCD::scanoutPanel(void)
++{
++	uint64_t run[2] = { fPhys, (uint64_t)fRowBytes * fHeight };
++	scanoutPublish(1, 0, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA, 0, run[1], run, 1);
++}
++
++/* Describe surface s in place; false if it cannot be (then it is copied). */
++bool
++AppleCLCD::scanoutSurface(SweetSurface *s)
++{
++	if (s->memory == NULL || s->elementWidth != 1 || s->elementHeight != 1 ||
++	    (s->bytesPerElement && s->bytesPerElement != 4) || s->pixelFormat != SWEET_FB_FORMAT_BGRA ||
++	    s->width != fLogicalW || s->height != fLogicalH || s->bytesPerRow < s->width * 4 ||
++	    (uint64_t)s->offset + (uint64_t)s->bytesPerRow * s->height > s->memory->getLength()) {
++		return false;
++	}
++	if (fScanKind == 2 && fScanID == s->id) {
++		/* Same buffer again: only the sequence moves (the app re-reads it). */
++		volatile uint32_t *d32 = (volatile uint32_t *)fScanout;
++		d32[2] = fScanSeq + 1;
++		__builtin_arm_dmb(0xf);
++		fScanSeq += 2;
++		d32[2] = fScanSeq;
++		return true;
++	}
++	uint32_t slot = SWEET_SCANOUT_CACHE;
++	for (uint32_t i = 0; i < SWEET_SCANOUT_CACHE; i++) {
++		if (fScanCache[i].id == s->id && fScanCache[i].runs != NULL) {
++			slot = i;
++			break;
++		}
++	}
++	if (slot == SWEET_SCANOUT_CACHE) {
++		slot = fScanNext++ % SWEET_SCANOUT_CACHE;
++		if (fScanCache[slot].runs == NULL) {
++			fScanCache[slot].runs = (uint64_t *)IOMallocData(SWEET_SCANOUT_MAX_RUNS * 2 * sizeof(uint64_t));
++			if (fScanCache[slot].runs == NULL) {
++				return false;
++			}
++		}
++		/* Physically contiguous pieces of the surface memory. */
++		uint64_t *runs = fScanCache[slot].runs;
++		uint64_t len = s->memory->getLength(), off = 0;
++		uint32_t n = 0;
++		fScanCache[slot].id = 0;
++		while (off < len) {
++			IOByteCount seg = 0;
++			addr64_t pa = s->memory->getPhysicalSegment(off, &seg, kIOMemoryMapperNone);
++			if (pa == 0 || seg == 0) {
++				return false;
++			}
++			if (seg > len - off) {
++				seg = len - off;
++			}
++			if (n > 0 && runs[2 * (n - 1)] + runs[2 * (n - 1) + 1] == pa) {
++				runs[2 * (n - 1) + 1] += seg;
++			} else {
++				if (n == SWEET_SCANOUT_MAX_RUNS) {
++					return false;
++				}
++				runs[2 * n] = pa;
++				runs[2 * n + 1] = seg;
++				n++;
++			}
++			off += seg;
++		}
++		fScanCache[slot].id = s->id;
++		fScanCache[slot].n = n;
++		if (fScanLogged < 8) {
++			fScanLogged++;
++			IOLog("SWEET FB: direct display: surface %u %ux%u bpr %u in %u piece(s)\n",
++			    s->id, s->width, s->height, s->bytesPerRow, n);
++		}
++	}
++	scanoutPublish(2, s->id, s->width, s->height, s->bytesPerRow, s->pixelFormat, s->offset,
++	    s->memory->getLength(), fScanCache[slot].runs, fScanCache[slot].n);
++	return true;
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+ 
++	if (fScanout != NULL) {
++		/* One full-screen layer: show iOS's surface itself (no copy). */
++		uint32_t layers = 0, only = SWEET_FB_LAYERS;
++		for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
++			if ((mask & (1u << layer)) && get32(rec, 0x54 + 4 * layer) != 0) {
++				layers++;
++				only = layer;
++			}
++		}
++		if (layers == 1) {
++			const uint8_t *a = rec + 0x64 + 16 * only;
++			const uint8_t *b = rec + 0xc4 + 16 * only;
++			SweetSurface *s = sweet_surface_copy(get32(rec, 0x54 + 4 * only));
++			bool full = get32(a, 0) == 0 && get32(a, 4) == 0 && get32(b, 0) == 0 && get32(b, 4) == 0 &&
++			    (get32(b, 8) == 0 || get32(b, 8) == fLogicalW) && (get32(b, 12) == 0 || get32(b, 12) == fLogicalH);
++			bool done = s != NULL && s != fSurface && full && scanoutSurface(s);
++			OSSafeReleaseNULL(s);
++			if (done) {
++				if (!fConsolePaused) {
++					int quiet = 0;
++					fConsolePaused = true;
++					if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
++						sweet_console_muted = 1;
++					}
++				}
++				return;
++			}
++		}
++	}
++
+ 
+ 	if (!fConsolePaused) {
+ 		int quiet = 0;
+@@ -436,6 +634,9 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		s->release();
+ 	}
++	if (fScanout != NULL) {
++		scanoutPanel();
++	}
+ }
+ 
+ /*

@@ -109,15 +109,83 @@ class VmActivity : Activity() {
         }
     }
 
+    /**
+     * Direct display: map QEMU's RAM (DirectFrame) and hand every new frame to the
+     * view; the VNC picture stays as the fallback (and for input).
+     */
+    @Volatile private var directThread: Thread? = null
+    @Volatile private var directRun = false
+
+    private fun startDirect() {
+        if (!store.directDisplay || directThread?.isAlive == true) return
+        directRun = true
+        directThread = Thread({
+            var ram: GuestRam? = null
+            try {
+                var reader: DirectFrame? = null
+                var buf: java.nio.ByteBuffer? = null
+                var last = -1
+                var misses = 0
+                while (directRun && VmState.active) {
+                    if (reader == null) {
+                        val pid = VmService.qemuPid
+                        val f = if (pid > 0) DirectFrame.findQemuRam(pid) else null
+                        if (f != null) {
+                            ram = GuestRam(f)
+                            reader = DirectFrame(ram)
+                        } else {
+                            Thread.sleep(500)
+                            continue
+                        }
+                    }
+                    if (!reader.ready()) {
+                        Thread.sleep(250)   // the kernel writes it when the display driver starts
+                        continue
+                    }
+                    val seq = reader.seq()
+                    if (seq == last || seq and 1 != 0) {
+                        Thread.sleep(4)
+                        continue
+                    }
+                    val b = buf ?: java.nio.ByteBuffer.allocateDirect(MAX_FRAME_BYTES)
+                    buf = b
+                    val frame = reader.fetch(b)
+                    if (frame == null) {
+                        if (++misses > 2000) break   // ~10 s of unusable descriptors: give up, VNC stays
+                        Thread.sleep(5)
+                        continue
+                    }
+                    misses = 0
+                    last = frame.seq
+                    buf = view.directFrame(b, frame.width, frame.height)
+                }
+            } catch (_: InterruptedException) {
+            } catch (e: Throwable) {
+                android.util.Log.w("Sweet16", "direct display stopped", e)
+            } finally {
+                try { ram?.close() } catch (_: Exception) {}
+                view.directOff()
+            }
+        }, "direct-display").apply { isDaemon = true; start() }
+    }
+
+    private fun stopDirect() {
+        directRun = false
+        directThread?.interrupt()
+        directThread = null
+    }
+
     override fun onResume() {
         super.onResume()
         hideSystemBars()
+        startDirect()
         VmState.observe(stateListener)
         onState()
         connect()
     }
 
     override fun onPause() {
+        stopDirect()
         VmState.remove(stateListener)
         disconnect()
         super.onPause()
@@ -255,6 +323,8 @@ class VmActivity : Activity() {
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
+        /** Largest direct-display frame: the presented 1125x2436 display, with margin. */
+        const val MAX_FRAME_BYTES = 1152 * 2560 * 4
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         @Suppress("unused") private val MONO = Typeface.MONOSPACE
     }

@@ -9,7 +9,9 @@
 # RUN_DIR/console.log, interactive on RUN_DIR/serial.sock
 # (`socat - UNIX-CONNECT:RUN_DIR/serial.sock`). QMP: RUN_DIR/qmp.sock.
 # Env: CPUS (default 4), DISK=none to boot without the virtio disk, NET=none
-# without the network (default: QEMU user networking = NAT, like the app).
+# without the network (default: QEMU user networking = NAT, like the app),
+# DIRECT=1: guest RAM in a memfd like the app's direct display (boot-arg
+# sweetfb_scanout=1; read frames with /proc/<qemu pid>/fd, see DirectFrame.kt).
 set -eu
 bundle=$(cd "$1" && pwd)
 disk=$2
@@ -47,10 +49,17 @@ if [ "${NET:-user}" = none ]; then
 else
     net="-netdev user,id=net0,ipv6=off -device virtio-net-device,netdev=net0"
 fi
+if [ "${DIRECT:-0}" = 1 ]; then
+    machine="virt,gic-version=3,highmem=on,memory-backend=ram0"
+    memobj="-object memory-backend-memfd,id=ram0,size=${ram_mb}M,share=on"
+else
+    machine="virt,gic-version=3,highmem=on"
+    memobj=""
+fi
 echo "run dir: $run" >&2
 exec qemu-system-aarch64 \
     -nodefaults -no-user-config \
-    -M virt,gic-version=3,highmem=on -cpu cortex-a76 -smp "$cpus" -m "$ram_mb" \
+    -M "$machine" $memobj -cpu cortex-a76 -smp "$cpus" -m "$ram_mb" \
     -accel tcg,thread=multi,tb-size=256 \
     -display none -vnc "unix:$run/vnc.sock" \
     -qmp "unix:$run/qmp.sock,server=on,wait=off" \

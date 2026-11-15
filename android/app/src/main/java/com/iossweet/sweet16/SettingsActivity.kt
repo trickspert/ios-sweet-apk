@@ -69,6 +69,9 @@ class SettingsActivity : Activity() {
             })
         })
 
+        switch("Direct display (sharper, every frame, phone GPU scaling)", store.directDisplay) { store.directDisplay = it }
+        note("Reads iOS's frames straight from the virtual machine's memory instead of the VNC picture. " +
+            "Turn off if the screen looks wrong.")
         switch("Fast mode (less kernel logging and sampling)", store.fastMode) { store.fastMode = it }
         note("Turns off debugging work that slows the emulator. Turn it off only to collect detailed logs.")
         text("Services not started (fast mode)")

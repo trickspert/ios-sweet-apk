@@ -144,6 +144,7 @@ class VmService : Service() {
             VmState.set(VmState.Phase.STARTING, "Starting QEMU", profile)
             val p = pb.start()
             process = p
+            qemuPid = pidOf(p).toIntOrNull() ?: -1
             log.line("QEMU started, pid ${pidOf(p)}")
             acquireWakeLock()
             // Wait for QEMU's VNC socket: then the machine is up.
@@ -152,12 +153,23 @@ class VmService : Service() {
                 Thread.sleep(100)
             }
             if (!p.isAliveCompat()) {
-                throw IllegalStateException("QEMU exited (${p.exitValue()}): " + store.qemuLog.readTail(1500))
+                val tail = store.qemuLog.readTail(1500)
+                if (store.directDisplay && (tail.contains("memfd") || tail.contains("memory-backend"))) {
+                    // This phone's QEMU cannot share its RAM: use the VNC picture from now on.
+                    log.line("direct display not possible here (QEMU: ${tail.trim().take(300)}); retrying without it")
+                    store.directDisplay = false
+                    process = null
+                    qemuPid = -1
+                    launch(profile, store, log)
+                    return
+                }
+                throw IllegalStateException("QEMU exited (${p.exitValue()}): " + tail)
             }
             log.line("VNC socket ${if (store.vncSocket.exists()) "up" else "not up after 30 s"}; machine running")
             VmState.set(VmState.Phase.RUNNING, "QEMU is running (pid ${pidOf(p)})", profile)
             val code = p.waitFor()
             process = null
+            qemuPid = -1
             stopShareServer()
             log.line("QEMU exited with $code")
             if (VmState.phase != VmState.Phase.STOPPED) {
@@ -325,6 +337,8 @@ class VmService : Service() {
     }
 
     companion object {
+        /** The running QEMU's pid (direct display maps its RAM), -1 if none. */
+        @Volatile var qemuPid = -1
         private const val TAG = "Sweet16"
         const val EXTRA_PROFILE = "profile"
         private const val CHANNEL = "vm"

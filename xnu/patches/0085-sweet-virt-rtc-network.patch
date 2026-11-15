@@ -1,0 +1,702 @@
+diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
+index 60627ab..a4fdaa0 100644
+--- a/bsd/dev/sweet_virtio.c
++++ b/bsd/dev/sweet_virtio.c
+@@ -22,6 +22,10 @@
+  *                   the HID services in SweetHID.cpp.
+  *   PL011           every console byte (the ring in sweet_ufs.c) is copied
+  *                   to the UART, i.e. to QEMU's -serial file.
++ *   virtio-net      Ethernet en0 (QEMU -netdev user: NAT through the host's
++ *                   network, DHCP and DNS at 10.0.2.2/10.0.2.3). It is also
++ *                   published in IOKit like an Ethernet adapter
++ *                   (SweetNet.cpp), so configd configures it with DHCP.
+  *
+  * Only modern (version 2) virtio-mmio transports are used: start QEMU with
+  * -global virtio-mmio.force-legacy=false. QEMU's virtio is cache coherent.
+@@ -40,6 +44,21 @@
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
++#include <sys/kpi_mbuf.h>
++#include <sys/kpi_socket.h>
++#include <sys/sockio.h>
++#include <net/if.h>
++#include <net/if_types.h>
++#include <net/ethernet.h>
++#include <net/if_ether.h>
++#include <net/ether_if_module.h>
++#include <net/kpi_interface.h>
++#include <net/kpi_protocol.h>
++#include <net/if_media.h>
++#include <net/bpf.h>
++#include <net/dlil.h>
++#include <netinet/in.h>
++#include <sys/kern_event.h>
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -54,6 +73,8 @@ int sweet_vblk_init(uint64_t *sectors, bool *can_flush);
+ int sweet_vblk_io(uint64_t sector, uint64_t pa, uint32_t len, bool write);
+ int sweet_vblk_flush(void);
+ void sweet_virt_start(void);
++void sweet_vnet_init(void);
++extern void sweet_net_publish(const uint8_t *mac, const char *prefix, uint32_t unit);
+ 
+ #define VIO_MAGIC               0x000
+ #define VIO_VERSION             0x004
+@@ -85,6 +106,7 @@ void sweet_virt_start(void);
+ #define ST_FAILED               128u
+ 
+ #define VIRTIO_ID_BLOCK         2
++#define VIRTIO_ID_NET           1
+ #define VIRTIO_ID_INPUT         18
+ #define VIRTIO_F_VERSION_1_HI   (1u << 0)       /* feature bit 32 */
+ #define VIRTIO_BLK_F_FLUSH      (1u << 9)
+@@ -649,4 +671,428 @@ sweet_virt_start(void)
+ 	printf("SWEET VIRT: %u input device(s), console on %s\n", vi_count,
+ 	    vt.uart ? "PL011" : "nothing");
+ }
++
++/*
++ * virtio-net -> en0. Polled like the rest: one thread drains the receive
++ * queue and reclaims sent buffers, every 1 ms while packets flow and every
++ * 10 ms when idle (a send wakes it at once to catch the reply). No offloads
++ * are negotiated: every buffer is a 12-byte virtio_net_hdr_v1 (all zero on
++ * transmit) plus one whole Ethernet frame, copied to/from mbufs.
++ *
++ * Boot-arg sweetnet: 0 = off, 1 = iOS configures en0 (DHCP from configd;
++ * default), 2 = also give it 10.0.2.15/24 in the kernel (Developer boot
++ * test without configd).
++ */
++#define VIRTIO_NET_F_MAC        (1u << 5)
++#define VNET_HDR                12
++#define VNET_BUF                2048
++#define VNET_RXN                64
++#define VNET_TXN                32
++
++static struct {
++	vm_offset_t regs;
++	struct vq rxq, txq;
++	vm_offset_t rxbuf, txbuf;
++	uint64_t rxbuf_pa, txbuf_pa;
++	uint16_t tx_free[VNET_TXN];
++	uint16_t tx_nfree;
++	lck_mtx_t *lock;
++	ifnet_t ifp;
++	uint8_t mac[ETHER_ADDR_LEN];
++	uint32_t busy;          /* polls left at the fast rate */
++	uint64_t rx_frames, tx_frames, tx_drops;
++	uint32_t seen;          /* VN_SEEN_* milestones already logged */
++	uint32_t ipv4;          /* en0's address as last logged */
++} vn;
++
++/*
++ * Bring-up milestones, logged once each to the kernel console (Kernel log
++ * > Copy log in the app): did iOS ask for DHCP, get an answer, resolve a
++ * name, open a TCP connection?
++ */
++#define VN_SEEN_DHCP_OUT        1u
++#define VN_SEEN_DHCP_IN         2u
++#define VN_SEEN_DNS_OUT         4u
++#define VN_SEEN_DNS_IN          8u
++#define VN_SEEN_TCP_OUT         16u
++#define VN_SEEN_TCP_IN          32u
++
++static void
++vnet_note(const uint8_t *f, uint32_t len, bool out)
++{
++	if (len < 14 + 20 + 4 || f[12] != 0x08 || f[13] != 0x00) {
++		return;
++	}
++	const uint8_t *ip = f + 14;
++	uint32_t ihl = (ip[0] & 15u) * 4;
++	if ((ip[0] >> 4) != 4 || ihl < 20 || len < 14 + ihl + 4) {
++		return;
++	}
++	const uint8_t *l4 = ip + ihl;
++	uint16_t sport = (uint16_t)((l4[0] << 8) | l4[1]), dport = (uint16_t)((l4[2] << 8) | l4[3]);
++	uint32_t bit = 0;
++	const char *what = NULL;
++	if (ip[9] == 17 && out && dport == 67) {
++		bit = VN_SEEN_DHCP_OUT; what = "iOS sent its first DHCP request";
++	} else if (ip[9] == 17 && !out && dport == 68) {
++		bit = VN_SEEN_DHCP_IN; what = "first DHCP answer from QEMU";
++	} else if (ip[9] == 17 && out && dport == 53) {
++		bit = VN_SEEN_DNS_OUT; what = "iOS sent its first DNS query";
++	} else if (ip[9] == 17 && !out && sport == 53) {
++		bit = VN_SEEN_DNS_IN; what = "first DNS answer";
++	} else if (ip[9] == 6 && len < 14 + ihl + 14) {
++		return;
++	} else if (ip[9] == 6 && out && (l4[13] & 0x12) == 0x02) {
++		bit = VN_SEEN_TCP_OUT; what = "iOS opened its first TCP connection";
++	} else if (ip[9] == 6 && !out && (l4[13] & 0x12) == 0x12) {
++		bit = VN_SEEN_TCP_IN; what = "first TCP connection accepted";
++	}
++	if (bit && !(vn.seen & bit)) {
++		vn.seen |= bit;
++		printf("SWEET NET: %s (%u.%u.%u.%u:%u -> %u.%u.%u.%u:%u)\n", what,
++		    ip[12], ip[13], ip[14], ip[15], sport, ip[16], ip[17], ip[18], ip[19], dport);
++	}
++}
++
++/* Log en0's IPv4 address when it changes (DHCP from configd, or sweetnet=2). */
++static void
++vnet_check_address(void)
++{
++	ifaddr_t *addrs = NULL;
++	uint32_t a = 0;
++	if (ifnet_get_address_list_family(vn.ifp, &addrs, AF_INET) == 0 && addrs != NULL) {
++		if (addrs[0] != NULL) {
++			struct sockaddr_in sin;
++			if (ifaddr_address(addrs[0], (struct sockaddr *)&sin, sizeof(sin)) == 0) {
++				a = ntohl(sin.sin_addr.s_addr);
++			}
++		}
++		ifnet_free_address_list(addrs);
++	}
++	if (a != vn.ipv4) {
++		vn.ipv4 = a;
++		printf("SWEET NET: en0 IPv4 address %u.%u.%u.%u (rx %llu, tx %llu frames)\n",
++		    a >> 24, (a >> 16) & 255, (a >> 8) & 255, a & 255, vn.rx_frames, vn.tx_frames);
++	}
++}
++static int vn_chan;
++
++static void
++vnet_rx_post(uint16_t i)
++{
++	struct vdesc *d = vq_desc(&vn.rxq, i);
++	d->addr = vn.rxbuf_pa + (uint64_t)i * VNET_BUF;
++	d->len = VNET_BUF;
++	d->flags = VRING_DESC_F_WRITE;
++	d->next = 0;
++	vq_push(&vn.rxq, i);
++}
++
++/* Returns the number of frames passed up. */
++static unsigned
++vnet_rx(void)
++{
++	unsigned n = 0;
++	bool posted = false;
++
++	while (*vq_used_idx(&vn.rxq) != vn.rxq.last_used) {
++		__builtin_arm_dmb(0xf);
++		volatile uint32_t *e = vq_used_elem(&vn.rxq, vn.rxq.last_used);
++		uint16_t id = (uint16_t)e[0];
++		uint32_t len = e[1];
++		vn.rxq.last_used++;
++		if (id >= vn.rxq.num) {
++			continue;
++		}
++		if (len > VNET_HDR + ETHER_HDR_LEN && len <= VNET_BUF && vn.ifp != NULL) {
++			uint32_t flen = len - VNET_HDR;
++			mbuf_t m = NULL;
++			/* One mbuf with a 2 KiB cluster holds any frame (see sweet_usb.c). */
++			if (mbuf_gethdr(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) == 0 &&
++			    mbuf_mclget(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) == 0 &&
++			    (mbuf_flags(m) & MBUF_EXT) && mbuf_maxlen(m) >= flen) {
++				struct ifnet_stat_increment_param stats = {};
++				memcpy(mbuf_data(m), (const void *)(vn.rxbuf + (vm_offset_t)id * VNET_BUF + VNET_HDR), flen);
++				mbuf_setlen(m, flen);
++				mbuf_pkthdr_setlen(m, flen);
++				vnet_note((const uint8_t *)mbuf_data(m), flen, false);
++				bpf_tap_in(vn.ifp, DLT_EN10MB, m, NULL, 0);
++				void *frame_header = mbuf_data(m);
++				mbuf_pkthdr_setrcvif(m, vn.ifp);
++				mbuf_pkthdr_setheader(m, frame_header);
++				mbuf_pkthdr_adjustlen(m, -ETHER_HDR_LEN);
++				(void)mbuf_setdata(m, (char *)mbuf_data(m) + ETHER_HDR_LEN, mbuf_len(m) - ETHER_HDR_LEN);
++				stats.packets_in = 1;
++				stats.bytes_in = flen;
++				vn.rx_frames++;
++				ifnet_input(vn.ifp, m, &stats);
++				n++;
++			} else if (m != NULL) {
++				mbuf_freem(m);
++			}
++		}
++		vnet_rx_post(id);
++		posted = true;
++	}
++	if (posted) {
++		vio_wr(vn.regs, VIO_QUEUE_NOTIFY, 0);
++	}
++	return n;
++}
++
++/* Take back the transmit buffers the device is done with. vn.lock held. */
++static void
++vnet_tx_reclaim_locked(void)
++{
++	while (*vq_used_idx(&vn.txq) != vn.txq.last_used) {
++		__builtin_arm_dmb(0xf);
++		uint16_t id = (uint16_t)vq_used_elem(&vn.txq, vn.txq.last_used)[0];
++		vn.txq.last_used++;
++		if (id < VNET_TXN && vn.tx_nfree < VNET_TXN) {
++			vn.tx_free[vn.tx_nfree++] = id;
++		}
++	}
++}
++
++static errno_t
++vnet_output(ifnet_t ifp, mbuf_t m)
++{
++	size_t len = mbuf_pkthdr_len(m);
++
++	lck_mtx_lock(vn.lock);
++	vnet_tx_reclaim_locked();
++	if (vn.tx_nfree == 0 || len < ETHER_HDR_LEN || len > VNET_BUF - VNET_HDR) {
++		vn.tx_drops++;
++		lck_mtx_unlock(vn.lock);
++		mbuf_freem(m);
++		ifnet_stat_increment_out(ifp, 0, 0, 1);
++		return 0;
++	}
++	uint16_t id = vn.tx_free[--vn.tx_nfree];
++	vm_offset_t buf = vn.txbuf + (vm_offset_t)id * VNET_BUF;
++	bzero((void *)buf, VNET_HDR);
++	mbuf_copydata(m, 0, len, (void *)(buf + VNET_HDR));
++	vnet_note((const uint8_t *)(buf + VNET_HDR), (uint32_t)len, true);
++	struct vdesc *d = vq_desc(&vn.txq, id);
++	d->addr = vn.txbuf_pa + (uint64_t)id * VNET_BUF;
++	d->len = (uint32_t)(VNET_HDR + len);
++	d->flags = 0;
++	d->next = 0;
++	vq_push(&vn.txq, id);
++	vio_wr(vn.regs, VIO_QUEUE_NOTIFY, 1);
++	vn.tx_frames++;
++	vn.busy = 200;
++	lck_mtx_unlock(vn.lock);
++
++	bpf_tap_out(ifp, DLT_EN10MB, m, NULL, 0);
++	ifnet_stat_increment_out(ifp, 1, len, 0);
++	mbuf_freem(m);
++	thread_wakeup((event_t)&vn_chan);
++	return 0;
++}
++
++static errno_t
++vnet_ioctl(ifnet_t ifp __unused, unsigned long cmd, void *data)
++{
++	switch (cmd) {
++	case SIOCGIFMEDIA32:
++	case SIOCGIFMEDIA64: {
++		/* configd and IPConfiguration ask for the link state here. */
++		struct ifmediareq *ifmr = (struct ifmediareq *)data;
++		user_addr_t list = (cmd == SIOCGIFMEDIA64) ?
++		    ((struct ifmediareq64 *)ifmr)->ifmu_ulist :
++		    CAST_USER_ADDR_T(((struct ifmediareq32 *)ifmr)->ifmu_ulist);
++		int media = IFM_ETHER | IFM_AUTO;
++		ifmr->ifm_current = media;
++		ifmr->ifm_active = IFM_ETHER | IFM_1000_T | IFM_FDX;
++		ifmr->ifm_mask = 0;
++		ifmr->ifm_status = IFM_AVALID | IFM_ACTIVE;
++		if (list != USER_ADDR_NULL && ifmr->ifm_count > 0) {
++			ifmr->ifm_count = 1;
++			return copyout(&media, list, sizeof(media));
++		}
++		ifmr->ifm_count = 1;
++		return 0;
++	}
++	case SIOCSIFADDR:
++	case SIOCAIFADDR:
++	case SIOCSIFFLAGS:
++	case SIOCADDMULTI:
++	case SIOCDELMULTI:
++		return 0;
++	default:
++		return EOPNOTSUPP;
++	}
++}
++
++static void
++vnet_detach(ifnet_t ifp __unused)
++{
++}
++
++static void
++vnet_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t next_check = 0, period;
++	nanoseconds_to_absolutetime(2 * NSEC_PER_SEC, &period);
++	for (;;) {
++		if (mach_absolute_time() >= next_check) {
++			vnet_check_address();
++			next_check = mach_absolute_time() + period;
++		}
++		unsigned n = vnet_rx();
++		lck_mtx_lock(vn.lock);
++		vnet_tx_reclaim_locked();
++		if (n) {
++			vn.busy = 200;
++		}
++		bool fast = vn.busy > 0;
++		if (fast) {
++			vn.busy--;
++		}
++		lck_mtx_unlock(vn.lock);
++		vio_wr(vn.regs, VIO_INTERRUPT_ACK, vio_rd(vn.regs, VIO_INTERRUPT_STATUS));
++		vio_sleep_ms(fast ? 1 : 10, (event_t)&vn_chan);
++	}
++}
++
++/* Developer boot test (sweetnet=2): en0 10.0.2.15/24, like QEMU's DHCP would. */
++static void
++vnet_static_address(void)
++{
++	errno_t err = proto_plumb(PF_INET, vn.ifp);
++	socket_t so = NULL;
++	if (err == 0) {
++		err = sock_socket(PF_INET, SOCK_DGRAM, 0, NULL, NULL, &so);
++	}
++	if (err == 0) {
++		struct ifaliasreq ifra;
++		bzero(&ifra, sizeof(ifra));
++		snprintf(ifra.ifra_name, sizeof(ifra.ifra_name), "en0");
++		struct sockaddr_in *a = (struct sockaddr_in *)&ifra.ifra_addr;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0x0a00020f);         /* 10.0.2.15 */
++		a = (struct sockaddr_in *)&ifra.ifra_mask;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0xffffff00);
++		a = (struct sockaddr_in *)&ifra.ifra_broadaddr;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0x0a0002ff);
++		err = sock_ioctl(so, SIOCAIFADDR, &ifra);
++		sock_close(so);
++	}
++	ifnet_set_flags(vn.ifp, IFF_UP, IFF_UP);
++	printf("SWEET NET: en0 10.0.2.15/24 %s (err %d)\n", err ? "NOT configured" : "up", err);
++}
++
++/* bsd_init, once the network stack is up and before the root is mounted. */
++void
++sweet_vnet_init(void)
++{
++	uint32_t mode = 1;
++	thread_t thread;
++
++	if (!sweet_virt_present()) {
++		return;
++	}
++	PE_parse_boot_argn("sweetnet", &mode, sizeof(mode));
++	if (mode == 0) {
++		return;
++	}
++	for (uint32_t i = 0; i < vt.count && !vn.regs; i++) {
++		vm_offset_t r = vio_find(i, VIRTIO_ID_NET);
++		if (!r) {
++			continue;
++		}
++		int64_t f = vio_negotiate(r, VIRTIO_NET_F_MAC);
++		if (f < 0 || !vio_queue(r, 0, &vn.rxq, VNET_RXN) || !vio_queue(r, 1, &vn.txq, VNET_TXN) ||
++		    vn.rxq.num < 8 || vn.txq.num < 8 ||
++		    !vio_alloc(VNET_RXN * VNET_BUF, &vn.rxbuf, &vn.rxbuf_pa) ||
++		    !vio_alloc(VNET_TXN * VNET_BUF, &vn.txbuf, &vn.txbuf_pa)) {
++			printf("SWEET NET: virtio-net on transport %u: setup failed\n", i);
++			vio_wr(r, VIO_STATUS, ST_FAILED);
++			continue;
++		}
++		if (f & VIRTIO_NET_F_MAC) {
++			for (int b = 0; b < ETHER_ADDR_LEN; b++) {
++				vn.mac[b] = *(volatile uint8_t *)(r + VIO_CONFIG + b);
++			}
++		} else {
++			static const uint8_t def[ETHER_ADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
++			memcpy(vn.mac, def, sizeof(def));
++		}
++		vn.regs = r;
++		vio_wr(r, VIO_STATUS, ST_ACKNOWLEDGE | ST_DRIVER | ST_FEATURES_OK | ST_DRIVER_OK);
++		for (uint16_t d = 0; d < vn.rxq.num; d++) {
++			vnet_rx_post(d);
++		}
++		vio_wr(r, VIO_QUEUE_NOTIFY, 0);
++		vn.tx_nfree = 0;
++		for (uint16_t d = 0; d < MIN(vn.txq.num, VNET_TXN); d++) {
++			vn.tx_free[vn.tx_nfree++] = d;
++		}
++		printf("SWEET NET: virtio-net on transport %u: MAC %02x:%02x:%02x:%02x:%02x:%02x, queues %u/%u\n",
++		    i, vn.mac[0], vn.mac[1], vn.mac[2], vn.mac[3], vn.mac[4], vn.mac[5], vn.rxq.num, vn.txq.num);
++	}
++	if (!vn.regs) {
++		return;
++	}
++
++	static lck_grp_t *grp;
++	grp = lck_grp_alloc_init("sweet_vnet", LCK_GRP_ATTR_NULL);
++	vn.lock = lck_mtx_alloc_init(grp, LCK_ATTR_NULL);
++
++	struct ifnet_init_eparams init;
++	bzero(&init, sizeof(init));
++	init.ver = IFNET_INIT_CURRENT_VERSION;
++	init.len = sizeof(init);
++	init.flags = IFNET_INIT_LEGACY;
++	init.uniqueid = "sweet-virtio-net";
++	init.uniqueid_len = sizeof("sweet-virtio-net") - 1;
++	init.name = "en";
++	init.unit = 0;
++	init.family = IFNET_FAMILY_ETHERNET;
++	init.type = IFT_ETHER;
++	init.output = vnet_output;
++	init.demux = ether_demux;
++	init.add_proto = ether_add_proto;
++	init.del_proto = ether_del_proto;
++	init.check_multi = ether_check_multi;
++	init.framer_extended = ether_frameout_extended;
++	init.ioctl = vnet_ioctl;
++	init.detach = vnet_detach;
++	init.broadcast_addr = etherbroadcastaddr;
++	init.broadcast_len = ETHER_ADDR_LEN;
++	if (ifnet_allocate_extended(&init, &vn.ifp) != 0) {
++		printf("SWEET NET: ifnet_allocate failed\n");
++		vn.ifp = NULL;
++		return;
++	}
++	ifnet_set_addrlen(vn.ifp, ETHER_ADDR_LEN);
++	ifnet_set_hdrlen(vn.ifp, sizeof(struct ether_header));
++	ifnet_set_mtu(vn.ifp, ETHERMTU);
++	ifnet_set_baudrate(vn.ifp, 1000000000);
++	ifnet_set_flags(vn.ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST, 0xffff);
++	if (ifnet_attach(vn.ifp, NULL) != 0) {
++		printf("SWEET NET: ifnet_attach failed\n");
++		vn.ifp = NULL;
++		return;
++	}
++	ifnet_set_lladdr(vn.ifp, vn.mac, ETHER_ADDR_LEN);
++	/* DHCP (IPConfiguration) and tcpdump use BPF. */
++	bpfattach(vn.ifp, DLT_EN10MB, sizeof(struct ether_header));
++	ifnet_set_flags(vn.ifp, IFF_RUNNING, IFF_RUNNING);
++	dlil_post_msg(vn.ifp, KEV_DL_SUBCLASS, KEV_DL_LINK_ON, NULL, 0, FALSE);
++	sweet_net_publish(vn.mac, "en", 0);
++	if (kernel_thread_start(vnet_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++	if (mode == 2) {
++		vnet_static_address();
++	}
++	printf("SWEET NET: en0 attached (sweetnet=%u)\n", mode);
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb2a2bf..bc54e86 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -863,6 +863,11 @@ bsd_init(void)
+ 	 */
+ 	bsd_init_kprintf("calling net_init_run\n");
+ 	net_init_run();
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* sweet-virt: virtio-net Ethernet en0 (bsd/dev/sweet_virtio.c). */
++	extern void sweet_vnet_init(void);
++	sweet_vnet_init();
++#endif
+ #endif /* NETWORKING */
+ 
+ 	bsd_init_kprintf("calling inittodr\n");
+diff --git a/iokit/Kernel/arm/SweetNet.cpp b/iokit/Kernel/arm/SweetNet.cpp
+new file mode 100644
+index 0000000..58cd522
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetNet.cpp
+@@ -0,0 +1,99 @@
++/*
++ * IOKit side of the sweet-virt Ethernet (bsd/dev/sweet_virtio.c, en0).
++ *
++ * The network stack itself needs no IOKit, but configd does: InterfaceNamer
++ * and SCNetworkInterface list network interfaces by matching IOKit objects
++ * of class IONetworkInterface whose IOService parent (the controller) has
++ * the MAC address; PreferencesMonitor then creates a DHCP service for each
++ * one and IPConfiguration runs DHCP on it. IONetworkingFamily is a kext that
++ * this kernel does not have, so the class names it would provide are
++ * defined here (empty: nothing calls into them) and one interface/controller
++ * pair is published with the properties configd reads:
++ *
++ *   interface  IOInterfaceType 6 (Ethernet), IOBuiltin, BSD Name "en0",
++ *              IOInterfaceNamePrefix "en", IOInterfaceUnit 0 (already named,
++ *              so InterfaceNamer does not try to name it through IONetworkStack)
++ *   controller IOMACAddress, IOFeatures
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOBSD.h>
++#include <IOKit/IOPlatformExpert.h>
++
++class IONetworkController : public IOService {
++	OSDeclareDefaultStructors(IONetworkController);
++};
++OSDefineMetaClassAndStructors(IONetworkController, IOService);
++
++class IOEthernetController : public IONetworkController {
++	OSDeclareDefaultStructors(IOEthernetController);
++};
++OSDefineMetaClassAndStructors(IOEthernetController, IONetworkController);
++
++class IONetworkInterface : public IOService {
++	OSDeclareDefaultStructors(IONetworkInterface);
++};
++OSDefineMetaClassAndStructors(IONetworkInterface, IOService);
++
++class IOEthernetInterface : public IONetworkInterface {
++	OSDeclareDefaultStructors(IOEthernetInterface);
++};
++OSDefineMetaClassAndStructors(IOEthernetInterface, IONetworkInterface);
++
++class SweetVirtioNet : public IOEthernetController {
++	OSDeclareDefaultStructors(SweetVirtioNet);
++};
++OSDefineMetaClassAndStructors(SweetVirtioNet, IOEthernetController);
++
++extern "C" void sweet_net_publish(const uint8_t *mac, const char *prefix, uint32_t unit);
++
++void
++sweet_net_publish(const uint8_t *mac, const char *prefix, uint32_t unit)
++{
++	IOService *provider = IOService::getPlatform();
++	SweetVirtioNet *ctl = OSTypeAlloc(SweetVirtioNet);
++	IOEthernetInterface *nif = OSTypeAlloc(IOEthernetInterface);
++	char bsd[16];
++
++	if (provider == NULL || ctl == NULL || nif == NULL || !ctl->init() || !nif->init()) {
++		IOLog("SWEET NET: IOKit objects not created\n");
++		OSSafeReleaseNULL(ctl);
++		OSSafeReleaseNULL(nif);
++		return;
++	}
++	snprintf(bsd, sizeof(bsd), "%s%u", prefix, unit);
++
++	ctl->setProperty("IOMACAddress", (void *)mac, 6);
++	ctl->setProperty("IOFeatures", 0ULL, 32);
++	ctl->setProperty("IOVendor", "QEMU");
++	ctl->setProperty("IOModel", "virtio-net");
++	ctl->setProperty("IOLinkStatus", 3ULL, 32);            /* valid | active */
++	ctl->setProperty("IOLinkSpeed", 1000000000ULL, 64);
++	ctl->setProperty("IOMaxPacketSize", 1518ULL, 32);
++	ctl->setProperty("IOMinPacketSize", 64ULL, 32);
++
++	nif->setProperty("IOInterfaceType", 6ULL, 8);          /* IFT_ETHER */
++	nif->setProperty("IOBuiltin", true);
++	nif->setProperty("IOPrimaryInterface", true);
++	nif->setProperty(kIOBSDNameKey, bsd);
++	nif->setProperty("IOInterfaceNamePrefix", prefix);
++	nif->setProperty("IOInterfaceUnit", (unsigned long long)unit, 32);
++	nif->setProperty("IOLocation", "");
++	nif->setProperty("IOMaxTransferUnit", 1500ULL, 32);
++	nif->setProperty("IOMediaAddressLength", 6ULL, 32);
++	nif->setProperty("IOMediaHeaderLength", 14ULL, 32);
++
++	if (!ctl->attach(provider) || !nif->attach(ctl)) {
++		IOLog("SWEET NET: IOKit attach failed\n");
++	} else {
++		ctl->registerService();
++		nif->registerService();
++		IOLog("SWEET NET: %s published in IOKit (IOEthernetInterface)\n", bsd);
++	}
++	ctl->release();
++	nif->release();
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 0631685..f7560d8 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -10,6 +10,41 @@
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+ 
++extern "C" int sweet_virt_present(void);
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++/*
++ * Wall clock. QEMU's virt board has a PL031 RTC at 0x09010000 that counts
++ * UTC seconds from the host's clock: on sweet-virt it gives the boot time
++ * (otherwise 1 Jan 1970, shown as 31 Dec on the lock screen) and keeps
++ * settimeofday. The phone has no RTC driver yet: time stays 0 there.
++ */
++#define SWEET_PL031_PA          0x09010000
++#define PL031_DR                0x00            /* data: seconds */
++#define PL031_LR                0x08            /* load */
++static volatile uint32_t *sweet_rtc;
++
++static void
++sweet_rtc_probe(void)
++{
++	if (!sweet_virt_present()) {
++		return;
++	}
++	vm_offset_t r = ml_io_map(SWEET_PL031_PA, 0x1000);
++	if (r == 0) {
++		return;
++	}
++	volatile uint32_t *p = (volatile uint32_t *)r;
++	/* PrimeCell IDs: peripheral 0x31 0x10 (PL031), cell 0x0d 0xf0 0x05 0xb1 */
++	if ((p[0xfe0 / 4] & 0xff) != 0x31 || (p[0xfe4 / 4] & 0xff) != 0x10 ||
++	    (p[0xff0 / 4] & 0xff) != 0x0d || (p[0xffc / 4] & 0xff) != 0xb1) {
++		IOLog("SWEET RTC: no PL031 at 0x%x\n", SWEET_PL031_PA);
++		return;
++	}
++	sweet_rtc = p;
++	IOLog("SWEET RTC: PL031 at 0x%x, UTC %u\n", SWEET_PL031_PA, p[PL031_DR / 4]);
++}
++
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+ 
+@@ -18,6 +53,8 @@ public:
+ 	void processTopLevel(IORegistryEntry *root) APPLE_KEXT_OVERRIDE;
+ 	const char *deleteList(void) APPLE_KEXT_OVERRIDE;
+ 	const char *excludeList(void) APPLE_KEXT_OVERRIDE;
++	long getGMTTimeOfDay(void) APPLE_KEXT_OVERRIDE;
++	void setGMTTimeOfDay(long secs) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+@@ -31,9 +68,30 @@ SweetPlatformExpert::start(IOService *provider)
+ 	}
+ 	registerService();
+ 	IOLog("SWEET: platform expert registered\n");
++	/*
++	 * IOKitInitializeTime() waits up to 30 s for an "IORTC" resource before
++	 * reading the clock; nothing else publishes one here. The time comes
++	 * from getGMTTimeOfDay() (0 without the PL031).
++	 */
++	sweet_rtc_probe();
++	publishResource("IORTC", this);
+ 	return true;
+ }
+ 
++long
++SweetPlatformExpert::getGMTTimeOfDay(void)
++{
++	return sweet_rtc != NULL ? (long)sweet_rtc[PL031_DR / 4] : 0;
++}
++
++void
++SweetPlatformExpert::setGMTTimeOfDay(long secs)
++{
++	if (sweet_rtc != NULL && secs > 0) {
++		sweet_rtc[PL031_LR / 4] = (uint32_t)secs;
++	}
++}
++
+ const char *
+ SweetPlatformExpert::deleteList(void)
+ {
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index acc9ae0..a55c12e 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -8,6 +8,7 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+ 
+ # SWEET device-tree platform (empty translation unit on other boards)
+ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
++iokit/Kernel/arm/SweetNet.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp

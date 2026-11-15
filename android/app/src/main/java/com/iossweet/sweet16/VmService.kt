@@ -126,6 +126,10 @@ class VmService : Service() {
             store.serialSocket.delete()
             store.consoleLog.delete()
             store.qemuDebugLog.delete()
+            if (store.network) {
+                writeDnsServers(store, log)
+                startShareServer(store, log)
+            }
             // Exactly what runs, for "Boot details" and bug reports.
             store.lastLaunch.writeText(launch.describe(store))
             val args = launch.args
@@ -140,6 +144,7 @@ class VmService : Service() {
             VmState.set(VmState.Phase.STARTING, "Starting QEMU", profile)
             val p = pb.start()
             process = p
+            qemuPid = pidOf(p).toIntOrNull() ?: -1
             log.line("QEMU started, pid ${pidOf(p)}")
             acquireWakeLock()
             // Wait for QEMU's VNC socket: then the machine is up.
@@ -148,12 +153,24 @@ class VmService : Service() {
                 Thread.sleep(100)
             }
             if (!p.isAliveCompat()) {
-                throw IllegalStateException("QEMU exited (${p.exitValue()}): " + store.qemuLog.readTail(1500))
+                val tail = store.qemuLog.readTail(1500)
+                if (store.directDisplay && (tail.contains("memfd") || tail.contains("memory-backend"))) {
+                    // This phone's QEMU cannot share its RAM: use the VNC picture from now on.
+                    log.line("direct display not possible here (QEMU: ${tail.trim().take(300)}); retrying without it")
+                    store.directDisplay = false
+                    process = null
+                    qemuPid = -1
+                    launch(profile, store, log)
+                    return
+                }
+                throw IllegalStateException("QEMU exited (${p.exitValue()}): " + tail)
             }
             log.line("VNC socket ${if (store.vncSocket.exists()) "up" else "not up after 30 s"}; machine running")
             VmState.set(VmState.Phase.RUNNING, "QEMU is running (pid ${pidOf(p)})", profile)
             val code = p.waitFor()
             process = null
+            qemuPid = -1
+            stopShareServer()
             log.line("QEMU exited with $code")
             if (VmState.phase != VmState.Phase.STOPPED) {
                 if (code == 0) VmState.set(VmState.Phase.STOPPED, "The virtual machine stopped")
@@ -164,6 +181,7 @@ class VmService : Service() {
             log.error("launch failed", t)
             process?.destroy()
             process = null
+            stopShareServer()
             VmState.set(VmState.Phase.FAILED, t.message ?: t.toString())
         } finally {
             launching = false
@@ -181,6 +199,45 @@ class VmService : Service() {
     private fun signalName(code: Int): String = when (code) {
         134 -> " (SIGABRT)"; 135 -> " (SIGBUS)"; 137 -> " (SIGKILL)"; 139 -> " (SIGSEGV)"; 159 -> " (SIGSYS: seccomp)"
         else -> if (code > 128) " (signal ${code - 128})" else ""
+    }
+
+    /**
+     * The phone's current DNS servers for QEMU's DNS forwarder (libslirp uses the
+     * first IPv4 one; public resolvers if the phone reports none).
+     */
+    private fun writeDnsServers(store: Store, log: LaunchLog) {
+        val found = mutableListOf<String>()
+        try {
+            val cm = getSystemService(android.net.ConnectivityManager::class.java)
+            cm.getLinkProperties(cm.activeNetwork)?.dnsServers?.forEach { a ->
+                a.hostAddress?.substringBefore('%')?.let { found += it }
+            }
+        } catch (e: Exception) {
+            log.line("DNS servers: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        val v4 = found.filter { ':' !in it }
+        val servers = (v4.ifEmpty { listOf("1.1.1.1", "8.8.8.8") }) + found.filter { ':' in it }
+        store.dnsFile.writeText(servers.joinToString("") { "nameserver $it\n" })
+        log.line("DNS for iOS (10.0.2.3 forwards to): ${servers.joinToString(", ")}")
+    }
+
+    @Volatile private var share: ShareServer? = null
+
+    /** Photos shared from Android: iOS Safari opens ShareServer.IOS_URL (no internet needed). */
+    private fun startShareServer(store: Store, log: LaunchLog) {
+        stopShareServer()
+        store.shareDir.mkdirs()
+        try {
+            share = ShareServer(store.shareDir, ShareServer.PORT, store.notesFile).also { it.start() }
+            log.line("photo sharing for iOS: ${ShareServer.IOS_URL} (${store.shareDir.list()?.size ?: 0} files)")
+        } catch (e: Exception) {
+            log.line("photo sharing not started: ${e.message}")
+        }
+    }
+
+    private fun stopShareServer() {
+        share?.stop()
+        share = null
     }
 
     private fun env(pb: ProcessBuilder, store: Store) {
@@ -232,6 +289,7 @@ class VmService : Service() {
     override fun onDestroy() {
         process?.destroy()
         process = null
+        stopShareServer()
         releaseWakeLock()
         super.onDestroy()
     }
@@ -279,6 +337,8 @@ class VmService : Service() {
     }
 
     companion object {
+        /** The running QEMU's pid (direct display maps its RAM), -1 if none. */
+        @Volatile var qemuPid = -1
         private const val TAG = "Sweet16"
         const val EXTRA_PROFILE = "profile"
         private const val CHANNEL = "vm"

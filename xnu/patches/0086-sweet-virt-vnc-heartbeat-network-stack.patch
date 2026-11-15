@@ -1,0 +1,164 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 5c54bba..75a74f1 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,6 +37,7 @@
+ #include "SweetSurface.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
++extern "C" int sweet_virt_present(void); /* bsd/dev/sweet_virtio.c */
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -108,6 +109,7 @@ public:
+ 	uint64_t      fPhys;
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
++	bool          fHeartbeat;               /* sweet-virt: keep QEMU's VNC polling fast */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
+ 	uint32_t      fScale;                   /* logical pixels per panel pixel */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+@@ -204,6 +206,9 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
++	uint32_t heartbeat = sweet_virt_present() ? 1 : 0;
++	PE_parse_boot_argn("sweetfb_heartbeat", &heartbeat, sizeof(heartbeat));
++	fHeartbeat = heartbeat != 0 && fWidth > 0 && fHeight > 0;
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+@@ -228,6 +233,23 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		0, 0,
+ 	};
+ 
++	/*
++	 * sweet-virt heartbeat: change the panel's last pixel every vsync.
++	 * QEMU's VNC server (the Android app's display) polls the framebuffer
++	 * every 30 ms but backs off by 50 ms per poll without a change, up to
++	 * 3 s: after a few idle seconds the first frames of a touch reached the
++	 * screen 0.5-3 s late (measured on PC: 562, 998, >3000 ms after 8 s
++	 * idle). A 16-step counter in the two low bits of blue and green
++	 * (invisible) differs at every poll; a flipped bit did not: two 60 Hz
++	 * flips between 30 ms polls cancel out.
++	 */
++	if (fb->fHeartbeat) {
++		volatile uint32_t *last = (volatile uint32_t *)(fb->fPixels +
++		    (uint64_t)(fb->fHeight - 1) * fb->fRowBytes + (uint64_t)(fb->fWidth - 1) * 4);
++		uint32_t c = (uint32_t)(count & 15);
++		*last = (*last & ~0x0303u) | (c & 3) | ((c >> 2) << 8);
++	}
++
+ 	IOLockLock(fb->fLock);
+ 	for (unsigned int i = 0; i < fb->fClients->getCount(); i++) {
+ 		IOMobileFramebufferUserClient *client =
+diff --git a/iokit/Kernel/arm/SweetNet.cpp b/iokit/Kernel/arm/SweetNet.cpp
+index 58cd522..9005942 100644
+--- a/iokit/Kernel/arm/SweetNet.cpp
++++ b/iokit/Kernel/arm/SweetNet.cpp
+@@ -12,8 +12,21 @@
+  *
+  *   interface  IOInterfaceType 6 (Ethernet), IOBuiltin, BSD Name "en0",
+  *              IOInterfaceNamePrefix "en", IOInterfaceUnit 0 (already named,
+- *              so InterfaceNamer does not try to name it through IONetworkStack)
++ *              so InterfaceNamer does not try to name it through IONetworkStack),
++ *              HiddenConfiguration (see below)
+  *   controller IOMACAddress, IOFeatures
++ *
++ * InterfaceNamer does nothing at all (no naming, no list of interfaces for
++ * the rest of configd) until it has opened the "IONetworkStack" service, so
++ * one is published too; its user client accepts and ignores naming
++ * requests (en0 is named by the kernel).
++ *
++ * The iOS root disk already has a saved network configuration from its
++ * earlier boots, and PreferencesMonitor only adds services for new
++ * interfaces when it creates that configuration. A built-in interface with
++ * HiddenConfiguration is "Apple pre-configured" instead: PreferencesMonitor
++ * gives it a DHCP + automatic IPv6 service in the dynamic store on every
++ * boot (not saved), which IPConfiguration then runs.
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+@@ -22,6 +35,8 @@
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOBSD.h>
+ #include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
+ 
+ class IONetworkController : public IOService {
+ 	OSDeclareDefaultStructors(IONetworkController);
+@@ -48,6 +63,58 @@ class SweetVirtioNet : public IOEthernetController {
+ };
+ OSDefineMetaClassAndStructors(SweetVirtioNet, IOEthernetController);
+ 
++class IONetworkStack : public IOService {
++	OSDeclareDefaultStructors(IONetworkStack);
++};
++OSDefineMetaClassAndStructors(IONetworkStack, IOService);
++
++class IONetworkStackUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(IONetworkStackUserClient);
++public:
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(IONetworkStackUserClient, IOUserClient);
++
++IOReturn
++IONetworkStackUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++IONetworkStackUserClient::setProperties(OSObject *properties)
++{
++	static uint32_t logged;
++	OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
++	OSNumber *cmd = dict ? OSDynamicCast(OSNumber, dict->getObject("IONetworkStackUserCommand")) : NULL;
++	OSNumber *unit = dict ? OSDynamicCast(OSNumber, dict->getObject("IOInterfaceUnit")) : NULL;
++	if (logged < 8) {
++		logged++;
++		IOLog("SWEET NET: IONetworkStack naming request (command %u, unit %u) accepted; en0 is named by the kernel\n",
++		    cmd ? cmd->unsigned32BitValue() : 0, unit ? unit->unsigned32BitValue() : 0);
++	}
++	return kIOReturnSuccess;
++}
++
++static void
++sweet_net_publish_stack(void)
++{
++	IOService *resources = IOService::getResourceService();
++	IONetworkStack *stack = OSTypeAlloc(IONetworkStack);
++	if (resources == NULL || stack == NULL || !stack->init()) {
++		OSSafeReleaseNULL(stack);
++		IOLog("SWEET NET: IONetworkStack not created\n");
++		return;
++	}
++	stack->setProperty(kIOUserClientClassKey, "IONetworkStackUserClient");
++	if (stack->attach(resources)) {
++		stack->registerService();
++	}
++	stack->release();
++}
++
+ extern "C" void sweet_net_publish(const uint8_t *mac, const char *prefix, uint32_t unit);
+ 
+ void
+@@ -85,12 +152,14 @@ sweet_net_publish(const uint8_t *mac, const char *prefix, uint32_t unit)
+ 	nif->setProperty("IOMaxTransferUnit", 1500ULL, 32);
+ 	nif->setProperty("IOMediaAddressLength", 6ULL, 32);
+ 	nif->setProperty("IOMediaHeaderLength", 14ULL, 32);
++	nif->setProperty("HiddenConfiguration", true);         /* pre-configured: DHCP service every boot */
+ 
+ 	if (!ctl->attach(provider) || !nif->attach(ctl)) {
+ 		IOLog("SWEET NET: IOKit attach failed\n");
+ 	} else {
+ 		ctl->registerService();
+ 		nif->registerService();
++		sweet_net_publish_stack();
+ 		IOLog("SWEET NET: %s published in IOKit (IOEthernetInterface)\n", bsd);
+ 	}
+ 	ctl->release();

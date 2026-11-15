@@ -73,9 +73,14 @@ class Launch private constructor(
             // lock timeouts. Android can pause a virtual CPU for a second while it holds a
             // spinlock; XNU's defaults (0.25 s / 0.125 s ticket locks) then panic:
             // "Ticket spinlock ... timeout after 52286220 ticks" on a Galaxy S25 Ultra.
-            val owned = listOf("cpus=", "sweetfb_scale=", "slto_us=", "tlto_us=")
+            // interrupt-masked-debug-mode=0: the DEVELOPMENT kernel panics when interrupts stay
+            // masked > 35 ms ("Processing of an interrupt ... took 15932560 ns"), which
+            // happens whenever the host pauses a virtual CPU; seen on PC at 6 vCPUs on 4 cores.
+            val owned = listOf("cpus=", "sweetfb_scale=", "slto_us=", "tlto_us=", "sweetfb_scanout=", "interrupt-masked-debug-mode=")
             val line = words.filter { w -> w.isNotBlank() && owned.none { w.startsWith(it) } } +
-                listOf("cpus=$cores", "sweetfb_scale=2", "slto_us=$LOCK_TIMEOUT_US", "tlto_us=$LOCK_TIMEOUT_US")
+                listOf("cpus=$cores", "sweetfb_scale=2", "slto_us=$LOCK_TIMEOUT_US", "tlto_us=$LOCK_TIMEOUT_US",
+                    "interrupt-masked-debug-mode=0") +
+                (if (store.directDisplay) listOf("sweetfb_scanout=1") else emptyList())
             val image = BootBuilder.build(
                 BootBuilder.Plan(store.kernelBytes(), store.ramMb, line.joinToString(" "), adtMode, apple, ramdisk),
                 store.stubTemplate(), store.bootDir)
@@ -86,11 +91,15 @@ class Launch private constructor(
             val a = mutableListOf(
                 "-nodefaults", "-no-user-config",
                 "-L", store.qemuData.path,
-                "-M", "virt,gic-version=3,highmem=on",
+                "-M", "virt,gic-version=3,highmem=on" + (if (store.directDisplay) ",memory-backend=ram0" else ""),
                 "-cpu", img.cpuModel,
                 "-smp", "${store.cores}",
                 "-m", "${store.ramMb}",
                 "-accel", "tcg,thread=multi,tb-size=${store.tbSizeMb}",
+            )
+            // Direct display: guest RAM in a memfd the app reads frames from (DirectFrame.kt).
+            if (store.directDisplay) a += listOf("-object", "memory-backend-memfd,id=ram0,size=${store.ramMb}M,share=on")
+            a += listOf(
                 "-display", "none",
                 "-vnc", "unix:${store.vncSocket.path}",
                 "-qmp", "unix:${store.qmpSocket.path},server=on,wait=off",
@@ -103,6 +112,11 @@ class Launch private constructor(
                 "-device", "virtio-tablet-device",
                 "-device", "virtio-keyboard-device",
             )
+            if (store.network) {
+                // NAT through the phone's connection: DHCP gives iOS 10.0.2.15, router
+                // 10.0.2.2, DNS 10.0.2.3 (forwarded to the nameservers in Store.dnsFile).
+                a += listOf("-netdev", "user,id=net0,ipv6=off", "-device", "virtio-net-device,netdev=net0")
+            }
             if (disk) {
                 a += listOf("-drive", "if=none,id=root,file=${store.disk.path},format=raw,cache=writeback,aio=threads",
                     "-device", "virtio-blk-device,drive=root")

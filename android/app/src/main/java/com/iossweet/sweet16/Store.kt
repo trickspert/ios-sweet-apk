@@ -31,6 +31,16 @@ class Store(private val context: Context) {
     val qemuDebugLog = File(files, "qemu-debug.log")
     val lastLaunch = File(files, "last-launch.txt")
     val launchLog = File(files, "launch.log")
+    /**
+     * Nameservers for QEMU's user networking: the APK's libslirp reads this path
+     * (/data/data/com.iossweet.sweet16/files/dns, patched in by
+     * android/tools/fetch-termux-qemu.py instead of Termux's resolv.conf).
+     */
+    val dnsFile = File(files, "dns")
+    /** Photos picked on Android for iOS, served at ShareServer.IOS_URL while iOS runs. */
+    val shareDir = File(files, "share")
+    /** Notes of the iOS Notes web app (ShareServer /notes). */
+    val notesFile = File(files, "notes.json")
     val bootDir = File(context.cacheDir, "boot")
     val selftestRamdisk = File(files, "sweet-sh")
     val vncSocket = File(context.cacheDir, "vnc.sock")
@@ -52,9 +62,26 @@ class Store(private val context: Context) {
     var skipServices: String
         get() = str("skip_services", DEFAULT_SKIP_SERVICES)
         set(v) = prefs.edit().putString("skip_services", v.replace(" ", "")).apply()
+    /** iOS gets internet through this phone (virtio-net + QEMU user networking). */
+    var network: Boolean
+        get() = bool("network", true)
+        set(v) = prefs.edit().putBoolean("network", v).apply()
+    /**
+     * Keep drawing the kernel log over iOS after its first frame. Off: the log is on
+     * screen while booting and then only in Kernel log (each new line scrolled the
+     * whole framebuffer, over the GUI, costing emulated CPU).
+     */
+    /**
+     * Direct display: QEMU's RAM in a memfd the app maps; iOS's frames are read from
+     * guest memory (no copy in the guest, every frame, full resolution) and scaled by
+     * the phone's GPU. Off: the VNC picture (half resolution) as before.
+     */
+    var directDisplay: Boolean
+        get() = bool("direct_display", true)
+        set(v) = prefs.edit().putBoolean("direct_display", v).apply()
     var showKernelLog: Boolean
-        get() = bool("kernel_log", true)
-        set(v) = prefs.edit().putBoolean("kernel_log", v).apply()
+        get() = bool("kernel_log_over_ios", false)
+        set(v) = prefs.edit().putBoolean("kernel_log_over_ios", v).apply()
     var forwardVolumeKeys: Boolean
         get() = bool("volume_keys", true)
         set(v) = prefs.edit().putBoolean("volume_keys", v).apply()
@@ -182,7 +209,10 @@ class Store(private val context: Context) {
          * kernel samples every thread once per second (telemetry); the IOKit trace and the
          * SpringBoard/backboardd stack sampler are bring-up diagnostics.
          */
-        val FAST_BOOT_ARGS = listOf("telemetry_sample_all_tasks=0", "sweetiolog=-", "sweetsample=-")
+        val FAST_BOOT_ARGS = listOf("telemetry_sample_all_tasks=0", "sweetiolog=-", "sweetsample=-",
+            // DEVELOPMENT kernels sample allocations into guard pages (PGZ): page remaps and
+            // TLB shootdowns across all virtual CPUs, expensive in emulation.
+            "pgz=0")
 
         /** Developer boot default: verbose kernel, console on the PL011, RAM disk root. */
         const val DEV_BOOT_ARGS = "-v debug=0xc serial=3 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0"

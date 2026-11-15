@@ -56,20 +56,29 @@ It starts a small Ubuntu VM (an unrooted phone can't mount disk images, the VM c
 3. **Settings (gear) → Battery: allow background use**, so Android doesn't stop the VM.
 4. Optional: Settings → CPU cores (6 is the default on 8-core phones, else half the cores).
 5. **Fast mode** (Settings, on by default) makes iOS boot and run faster: the kernel skips debugging work (per-thread telemetry sampling, IOKit tracing, extra logging) and does not start `bluetoothd` and `fairplayd.H2`, which only crash and restart without their hardware. Turn it off only to collect detailed logs.
+6. **Direct display** (Settings, on by default): the app reads iOS's frames straight from the virtual machine's memory and scales them on the phone's GPU (every frame, full resolution, no copy inside the emulator). Where Android does not allow it, the kernel keeps sending the normal picture.
 
 ### 4. Start iOS 16
 
-Tap **Start**. You see the Apple logo for a long time on the first boot (about an hour, while iOS sets itself up), possibly a black screen, then the lock screen. Later boots are much faster: about 4 minutes on a Galaxy S25 Ultra, and quicker still with Fast mode (since 2026-11-14). Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
+Tap **Start**. You see the Apple logo for a long time on the first boot (about an hour, while iOS sets itself up), possibly a black screen, then the lock screen. Later boots are much faster: about 4 minutes on a Galaxy S25 Ultra, and quicker still with Fast mode. Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Internet check, Performance, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
 
-### What works in Sweet16 (2026-11-14)
+### Extras
+
+- **Photos from Android:** main screen ⋮ → **Share photos with iOS…**, then in iOS Safari open `http://10.0.2.2:16016`, touch and hold a photo → Add to Photos (then Settings → Wallpaper). Works without internet.
+- **Notes for iOS:** in iOS Safari open `http://10.0.2.2:16016/notes` → Share → **Add to Home Screen**. A Notes web app; notes are also saved in Sweet16 on Android. (The disk built from the IPSW has no Notes, Calendar or Clock apps.)
+- **Internet check** and **Performance** (handle, ⋮ menu, Kernel log screen): how far iOS got with its network, and which iOS processes use the emulated CPUs.
+
+### What works in Sweet16 (2026-11-15)
 
 | | |
 | --- | --- |
 | Kernel | XNU boots on up to 8 virtual CPUs (6 by default on 8-core phones), kernel console on the serial port; Fast mode |
 | iOS userland | launchd, the system daemons, backboardd, SpringBoard |
-| Screen | Apple logo, **lock screen**, **Control Center**, **home screen**, the **Settings** app (iOS draws at 1125×2436, shown at half size) |
+| Screen | Apple logo, **lock screen**, **Control Center**, **home screen**, the **Settings** app, Safari; Direct display at full 1125×2436 |
+| Date and time | Real date and time from the emulator's clock (set your time zone in iOS Settings → General → Date & Time) |
 | Input | Touch and iOS gestures: swipe up to unlock and to leave apps (back to the home screen), app switcher, Control Center; Home, Lock and volume buttons |
-| Not working | Internet / Wi-Fi, sound, camera, GPS, Bluetooth, App Store, GPU; the date shows Dec 31 (no clock chip yet) |
+| Network | A virtual Ethernet card (not Wi-Fi) through the phone's connection. iOS finds it but does not configure it yet; after 5 minutes the kernel gives it an address itself, enough for the photo and Notes pages at 10.0.2.2, not yet for websites (no DNS) |
+| Not working | Websites in Safari (see Network), Wi-Fi as such, sound, camera, GPS, Bluetooth, App Store, GPU (iOS draws on the emulated CPU: 3-15 fps) |
 
 ### How Sweet16 works
 

@@ -2,8 +2,128 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-15 ~05:30 UTC: phone: direct display black; 0089 handshake; network stops after configd opens the stack <<<
+- S25 with direct display on: black screen (iOS ran: backboardd created surface 2 1125x2436 BGRA, swaps).
+  Kernel showed kind 2 (no panel copy) while the app evidently could not read QEMU's RAM -> VNC stayed black.
+  Off: works again (home screen: only Photos, App Store, Settings, Phone, Safari, Messages - removable
+  Apple apps like Notes/Calendar/Clock/Camera are not on the user's disk or not registered).
+- 0089: app writes a counter at descriptor+0x38 (GuestRam rw); kernel zero-copies only while it changed
+  within 1 s (scanoutAppReading), else copies at sweetfb_hz. PC check: "direct display: the app reads frames
+  from RAM" only after the counter moved. App logs direct-display steps to the Launch log.
+- Internet check on the phone: en0 attached + "configd opened IONetworkStack", but no "turned en0 on", no
+  DHCP. Next: find why configd/IPConfiguration ignore en0 (pre-configured path not taken?); fallback
+  (300 s) result not reported yet.
+- CI run 43663694634; APK sent as Sweet16-display-fix-test.apk.
+
+### >>> 2026-11-15 ~00:30 UTC: 0086 on the phone: Safari still loads nothing (no log given); 0087 + app <<<
+- User: Safari still loads nothing; asked for Notes app, Wi-Fi, "reverse engineered hardware acceleration",
+  a real photo importer. Still no kernel log from the phone (asked repeatedly), so this round adds
+  self-diagnosis and fallbacks:
+  - 0087 (sweet_virtio.c): fallback after sweetnetwait s (default 300, 0 = off, sweetnet=2 disables) with no
+    IPv4 on en0: kernel 10.0.2.15/24 + default route via 10.0.2.2 (rtrequest RTM_ADD, like netboot.c). Logs
+    "SWEET NET: <proc> turned en0 on" (SIOCSIFFLAGS) and "<proc> opened IONetworkStack" (SweetNet.cpp).
+    Existing Redmi-era logs also show "SWEET NET: <proc> en0 add address" (in.c) and "<proc> route add"
+    (rtsock.c).
+  - App: NetCheck.kt/NetCheckDialog.kt "Internet check" (main menu, VM handle, console): checklist from
+    the SWEET NET lines + UDP DNS probe from the phone to the nameserver in files/dns. JVM tests.
+  - Notes: no native iOS app can be built/installed here; NotesPage.kt = a home-screen web app at
+    http://10.0.2.2:16016/notes (Add to Home Screen), localStorage + POST /api/notes -> files/notes.json.
+    Checked in Playwright (iPhone X emulation): create/edit/list, reload, fresh browser loads from server.
+  - Not attempted: GPU acceleration (no virtual GPU path for CoreAnimation); @2x rendering (MobileGestalt
+    cache) - only after networking/logs work. Photo import into the Photos library without iOS networking
+    (kernel writing DCIM + rebuilding Photos.sqlite) judged too risky blind.
+- Commit 44ae365, CI run 43657614122 (cancelled by the next push), stage-test e56cd16.
+- Direct display (0088 + app, commit 189c8a9, CI run 43658175782): "hardware acceleration" as far as it goes
+  here: QEMU RAM as memfd (-object memory-backend-memfd,id=ram0,share=on; -M ...,memory-backend=ram0; QEMU
+  names it /memfd:memory-backend-memfd), the app maps /proc/<pid>/fd/N read-only (GuestRam, 1 GB windows).
+  Kernel descriptor at FB+0x1600000 (magic 'S16D', seqlock, w/h/bpr/fmt, offset, runs of {pa,len}); kind 2 =
+  backboardd's single full-screen BGRA surface in place (getPhysicalSegment runs cached per surface id, no
+  copy, fFlushTicks=1 i.e. every vsync), kind 1 = the panel (copy path, power-off fade). App: VmView draws
+  the frame bitmap with a R<->B ColorMatrix (GPU scaling), touch mapped frame->VNC linearly; VNC remains for
+  input and fallback; QEMU failing on memfd -> store.directDisplay=false and relaunch. JVM tests:
+  DirectFrameTest (scattered pieces, seqlock), LiveDirectFrameTest (env SWEET16_QEMU_PID).
+  Kind 2 can only be checked on the phone (needs backboardd swaps).
+- CI run 43658280624 green (kernel 53cca512..., APK versionCode 456519, same cert). PC checks with it:
+  - nettest, sweetnet=1 sweetnetwait=8: "iOS did not configure en0 within 8 s (DHCP request never sent):
+    kernel fallback", "kernel_task turned en0 on", address 10.0.2.15, "default route via 10.0.2.2 added";
+    nettest: DNS answer, HTTP 200 5 MB, default route yes.
+  - Direct display, DIRECT=1 + sweetfb_scanout=1, sweet-sh: "SWEET FB: direct display descriptor at
+    0x9d600000"; LiveDirectFrameTest (the app's Kotlin reader via /proc/<pid>/fd memfd) read kind 1 560x1218
+    in 5.5 ms; 0 differing samples vs QMP screendump.
+- APK sent as Sweet16-direct-display-notes-test.apk.
+
+### >>> 2026-11-14 ~23:30 UTC: phone test of 0085: no internet; 0086 = configd fix + VNC heartbeat + photo sharing <<<
+- User (S25): "nothing loads after 5 mins"; display 3-12 fps; asked for >=30 Hz, wallpaper/photos, Notes app.
+  No log yet (asked for Copy log + home-screen screenshot).
+- Root cause found in configd sources (not yet confirmed on the phone): InterfaceNamer's updateInterfaces()
+  returns at once while S_connect == NULL, i.e. until IOServiceOpen of an "IONetworkStack" service works
+  (IONetworkingFamily kext, absent) -> no naming, no pre-configured list, "No network stack object".
+  Also PreferencesMonitor sets haveConfiguration=TRUE when preferences.plist has a current set (true on the
+  user's disk after earlier boots) and then never adds services for new interfaces. 0086 (SweetNet.cpp):
+  IONetworkStack on IOResources + IONetworkStackUserClient (setProperties accepts/ignores naming; logs
+  "SWEET NET: IONetworkStack naming request"), en0 gets HiddenConfiguration=true -> builtin+hidden =
+  _SCNetworkInterfaceIsApplePreconfigured -> InterfaceNamer shares it as pre-configured ->
+  PreferencesMonitor addPreconfiguredServices(): Setup: DHCP + IPv6 automatic service every boot (not saved).
+- VNC latency measured on PC (dev boot, kernel console changes, tools: scratchpad vnclat.py): first update
+  562 ms, 998 ms, >3000 ms after 8 s idle = QEMU vnc_refresh backoff (+50 ms per idle poll up to 3 s).
+  0086 SweetFramebuffer: XOR bit 0 of the panel's last pixel every vsync (boot-arg sweetfb_heartbeat,
+  default on with sweet-virt). App: RfbClient re-requests immediately (VmActivity used minFrameMs=33 ->
+  missed polls -> more backoff), ignores the heartbeat tile (w<=16,h==1,last row) for redraws.
+  Kernel log no longer drawn over iOS by default (pref key kernel_log_over_ios, default false ->
+  sweetfb_noconsole=1).
+- Photos: ShareServer.kt (JVM-tested) serves Store.shareDir on 127.0.0.1:16016 while iOS runs = iOS Safari
+  http://10.0.2.2:16016 (slirp maps 10.0.2.2 to host loopback); main menu "Share photos with iOS..." (photo
+  picker), Settings "Photos for iOS".
+- Not done / ideas: iOS renders 1125x2436 in software (CoreAnimation CPU renderer) - the real fps limit;
+  rendering at @2x would need MobileGestalt cache changes (main-screen-*), not attempted blind. Shared-memory
+  display (QEMU memory-backend-memfd is in the Termux build) could replace VNC later.
+- Commit eac7f14, CI android run 43650636850, stage-test updated (9eeb909).
+- First 0086 kernel: heartbeat XOR bit cancelled out (two 60 Hz flips per 30 ms poll): 81 ms / 333 ms / none.
+  Fixed (95ab27d): 16-step counter in the low 2 bits of blue+green. CI run 43652199195 (kernel 07f806a7...,
+  APK versionCode 456447, same cert). PC re-test, 5 trials after 8 s idle: change visible after 8-42 ms,
+  steady 200 updates / 6 s. nettest (sweetnet=2) on 0086: date, DNS answer, HTTP 200 5 MB OK.
+- Test pitfall: a client connected to serial.sock that never reads stalls QEMU (PL011 writes 1 byte per
+  skb, the unix socket fills after a few hundred bytes, the vCPU blocks with the BQL) - looked like a guest
+  hang after the 3rd command. The app's ConsoleActivity drains it while open and disconnects on pause.
+- APK sent as Sweet16-internet-smooth-photos-test.apk. Unverified on the phone: configd DHCP on en0 (look for
+  "SWEET NET: IONetworkStack naming request" / "iOS sent its first DHCP request" / "en0 IPv4 address").
+
+### >>> 2026-11-14 ~22:30 UTC: date/time + internet (patch 0085) - CI building, untested on the phone <<<
+- User tested Safari: it opens (Favorites page, blank apple.com without network). Asked for Wi-Fi + date/time.
+- Found on PC: every boot waited exactly 30 s in IOKitInitializeTime (no "IORTC" resource) - visible as a
+  30.0 s gap after "using 2900 buffer headers". 0085 publishes IORTC from SweetPlatformExpert and reads
+  QEMU virt's PL031 (0x09010000, PrimeCell ID checked) in getGMTTimeOfDay -> real UTC, ~30 s faster boot.
+- 0085 virtio-net (sweet_virtio.c, started from bsd_init after net_init_run): en0, polled 1 ms busy / 10 ms
+  idle, BPF in/out, SIOCGIFMEDIA active; boot-arg sweetnet=0/1(default, configd DHCP)/2(kernel 10.0.2.15/24).
+  SweetNet.cpp defines empty IONetworkController/IOEthernetController/IONetworkInterface/IOEthernetInterface
+  classes (IONetworkingFamily is a kext we lack) and publishes en0 with IOInterfaceType 6, IOBuiltin,
+  BSD Name, IOInterfaceUnit 0 (= already named for InterfaceNamer), controller IOMACAddress - what
+  configd's SCNetworkInterface/InterfaceNamer/PreferencesMonitor read (sources: apple-oss-distributions
+  configd-1405, bootp). Kernel console milestones: "SWEET NET: iOS sent its first DHCP request", "first DHCP
+  answer", "en0 IPv4 address ...", first DNS query/answer, first TCP connection.
+- App: -netdev user,id=net0,ipv6=off -device virtio-net-device; INTERNET permission; Settings switch.
+  Termux libslirp reads /data/data/com.termux/files/usr/etc/resolv.conf for DNS forwarding (unreadable
+  for the app -> DNS would fail): fetch-termux-qemu.py rewrites that string to
+  /data/data/com.iossweet.sweet16/files/dns (NUL-padded, 31 bytes differ); VmService writes the phone's DNS
+  servers there (ConnectivityManager), fallback 1.1.1.1/8.8.8.8.
+- Test tools: tools/virt-tests/nettest.c + build-nettest.sh (PID 1, raw syscalls; needs -ffixed-x18: XNU
+  clears x18). On the OLD kernel it prints time 30 (=the 30 s wait) and ENETUNREACH (51), as expected.
+  tools/xnu-cc.py works with Ubuntu clang 18 (XNU_CC_CLANG=/usr/bin/clang) on the CI buildtree + job log.
+- Commits 095160b (0085 + app), da3ad0a (milestone logs); CI android run 43646191543; stage-test run
+  43646259120 waits for it and copies artifacts into a draft release (this session cannot delete releases).
+- CI run 43646191543 green (kernel sha256 5cefa262...; APK versionCode 456377, same cert, INTERNET +
+  ACCESS_NETWORK_STATE, libslirp path patched). PC QEMU 8.2 results with that kernel:
+  - nettest + sweetnet=2: "SWEET RTC: PL031 ... UTC 1794694785", nettest time 2026-11-14 22:19:46 UTC (= host),
+    userland at 1.0 s instead of 31 s; DNS query/answer through 10.0.2.3 (rcode 3 only because this sandbox has
+    no outside DNS); HTTP via 10.0.2.2:8080 200 OK, 5,000,206 bytes in ~1.0 s (4 vCPUs), no panic.
+  - sweet-sh + default sweetnet=1 + fast-mode args, 6 vCPUs: `sweet#` at 0.9 s (was 32 s), en0 attached +
+    "published in IOKit". Kernel prints "skip attaching fsw to en0 using legacy TX model" (Skywalk; harmless).
+- APK sent to the user as Sweet16-internet-clock-test.apk. NOT verified yet: iOS (configd) DHCP on en0, Safari.
+  If it fails, ask for Copy log and look for the SWEET NET milestone lines.
+
 ### >>> 2026-11-14 later: user confirmed fast mode is faster on the S25 Ultra -> merged to main, new release <<<
 - User: "its good now it's faster" (no exact time given). Asked to publish as an update and keep the old
+- PR #6 merged (f1d603f); android run 43641623387 all green -> release sweet16-build-19 (APK + boot bundle).
   releases: android.yml release job makes a new sweet16-build-N tag; older releases are untouched.
 - Still open for the user: delete the draft "Sweet16 test build (run 43638670856)" and the "Sweet16bin"
   release (it holds DT-d22ap.bin, an Apple file). This session cannot edit/delete releases.

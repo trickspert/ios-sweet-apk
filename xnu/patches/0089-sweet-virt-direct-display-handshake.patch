@@ -1,0 +1,84 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 93fcb23..f26b5b8 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -99,11 +99,16 @@ enum {
+  *   0x18 u32 pixel format ('BGRA')   0x1c u32 number of runs
+  *   0x20 u64 byte offset of pixel (0,0) in the runs   0x28 u64 total bytes
+  *   0x30 u32 kind: 1 = the panel (the copied frame), 2 = iOS's own surface
++ *   0x38 u32 written by the app: a counter it changes while it reads frames
+  *   0x40 runs: { u64 physical address, u64 length } x number of runs
+  *
+  * A single full-screen layer (what backboardd presents) is shown in place
+  * (kind 2, no copy at all: more CPU for iOS, every frame, full 1125x2436);
+  * anything else is copied to the panel as before and described as kind 1.
++ * Only while the app's counter (0x38) keeps changing: otherwise (app not
++ * running, or it cannot map the RAM on that phone) frames are copied to the
++ * panel, which QEMU's VNC picture shows. A phone where the app could not
++ * read the RAM showed nothing at all without this.
+  */
+ #define SWEET_SCANOUT_OFFSET            0x1600000
+ #define SWEET_SCANOUT_SIZE              0x100000
+@@ -161,6 +166,10 @@ public:
+ 	} fScanCache[SWEET_SCANOUT_CACHE];
+ 	uint32_t      fScanNext;
+ 	uint32_t      fScanLogged;
++	uint32_t      fScanAck;
++	uint64_t      fScanAckTime;
++	bool          fScanAckLogged;
++	bool scanoutAppReading(void);
+ 
+ 	void scanoutPublish(uint32_t kind, uint32_t id, uint32_t w, uint32_t h, uint32_t bpr, uint32_t fmt,
+ 	    uint64_t offset, uint64_t total, const uint64_t *runs, uint32_t nruns);
+@@ -258,8 +267,6 @@ AppleCLCD::start(IOService *provider)
+ 		vm_offset_t d = ml_io_map((vm_offset_t)(fPhys + SWEET_SCANOUT_OFFSET), SWEET_SCANOUT_SIZE);
+ 		if (d != 0) {
+ 			fScanout = (volatile uint8_t *)d;
+-			/* Nothing is copied for the usual frame: show every one. */
+-			fFlushTicks = 1;
+ 			scanoutPanel();
+ 			*(volatile uint32_t *)(fScanout + 4) = 1;
+ 			__builtin_arm_dmb(0xf);
+@@ -334,7 +341,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+ 	}
+-	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++	/* While the app reads frames in place nothing is copied: show every one. */
++	uint32_t ticks = (fb->fScanout != NULL && fb->scanoutAppReading()) ? 1 : fb->fFlushTicks;
++	bool flush = fb->fDirty && (count % ticks) == 0;
+ 	uint8_t *rec = NULL;
+ 	if (flush) {
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+@@ -508,12 +517,30 @@ AppleCLCD::scanoutSurface(SweetSurface *s)
+ 	return true;
+ }
+ 
++/* Is the app reading frames (its counter at 0x38 changed within 1 s)? */
++bool
++AppleCLCD::scanoutAppReading(void)
++{
++	uint32_t ack = *(volatile uint32_t *)(fScanout + 0x38);
++	uint64_t now = mach_absolute_time(), second;
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
++	if (ack != fScanAck) {
++		fScanAck = ack;
++		fScanAckTime = now;
++		if (!fScanAckLogged) {
++			fScanAckLogged = true;
++			IOLog("SWEET FB: direct display: the app reads frames from RAM\n");
++		}
++	}
++	return fScanAckTime != 0 && now - fScanAckTime < second;
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+ 
+-	if (fScanout != NULL) {
++	if (fScanout != NULL && scanoutAppReading()) {
+ 		/* One full-screen layer: show iOS's surface itself (no copy). */
+ 		uint32_t layers = 0, only = SWEET_FB_LAYERS;
+ 		for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {

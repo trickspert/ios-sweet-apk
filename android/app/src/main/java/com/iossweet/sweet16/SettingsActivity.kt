@@ -69,6 +69,9 @@ class SettingsActivity : Activity() {
             })
         })
 
+        switch("Direct display (sharper, every frame, phone GPU scaling)", store.directDisplay) { store.directDisplay = it }
+        note("Reads iOS's frames straight from the virtual machine's memory instead of the VNC picture. " +
+            "Turn off if the screen looks wrong.")
         switch("Fast mode (less kernel logging and sampling)", store.fastMode) { store.fastMode = it }
         note("Turns off debugging work that slows the emulator. Turn it off only to collect detailed logs.")
         text("Services not started (fast mode)")
@@ -80,7 +83,10 @@ class SettingsActivity : Activity() {
             setOnFocusChangeListener { _, has -> if (!has) store.skipServices = text.toString() }
         })
         note("iOS services that only crash and restart without their hardware, comma separated. Empty = start all.")
-        switch("Show the kernel log on screen while booting", store.showKernelLog) { store.showKernelLog = it }
+        switch("Internet for iOS (through this phone's connection)", store.network) { store.network = it }
+        note("iOS sees a wired Ethernet connection (not Wi-Fi). Safari and other apps can use the internet.")
+        switch("Keep the kernel log on screen over iOS (slower)", store.showKernelLog) { store.showKernelLog = it }
+        note("Off: the log shows while booting and stops when iOS appears (it is always in Kernel log).")
         switch("Phone volume keys control iOS", store.forwardVolumeKeys) { store.forwardVolumeKeys = it }
 
         text("Extra kernel boot-args (advanced)")
@@ -104,6 +110,16 @@ class SettingsActivity : Activity() {
                 .setPositiveButton("Delete") { _, _ -> if (!VmState.active) store.disk.delete(); build() }
                 .setNegativeButton("Cancel", null)
                 .show()
+        }
+
+        section("Photos for iOS")
+        val shared = store.shareDir.listFiles()?.filter { it.isFile } ?: emptyList()
+        text("${shared.size} photo${if (shared.size == 1) "" else "s"} shared (${shared.sumOf { it.length() } shr 20} MB)")
+        note("Main screen ⋮ → Share photos with iOS… adds photos. In iOS Safari open ${ShareServer.IOS_URL}, " +
+            "touch and hold a photo → Add to Photos.")
+        if (shared.isNotEmpty()) button("Remove the shared photos", danger = true) {
+            store.shareDir.listFiles()?.forEach { it.delete() }
+            build()
         }
 
         section("Keep running in the background")

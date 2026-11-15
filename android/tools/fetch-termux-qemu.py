@@ -22,6 +22,11 @@ original names as symlinks (VmService.kt) and puts that directory first in
 LD_LIBRARY_PATH. Libraries Android itself provides (bionic, liblog,
 libandroid, ...) are not copied.
 
+One string is changed, keeping every byte offset: libslirp (QEMU's user
+networking) forwards the guest's DNS to the nameserver in Termux's
+resolv.conf, which the app cannot read; the path now names the app's own
+file (Store.dnsFile), NUL-padded to the same length.
+
 QEMU is GPL-2.0; the package versions and source URLs are written to
 OUT_ASSETS_DIR/qemu/SOURCES.txt.
 """
@@ -31,6 +36,8 @@ REPO = 'https://packages.termux.dev/apt/termux-main'
 INDEX = f'{REPO}/dists/stable/main/binary-aarch64/Packages'
 ROOT_PKGS = ['qemu-system-aarch64-headless']
 PREFIX = 'data/data/com.termux/files/usr/'
+SLIRP_RESOLV = (b'/data/data/com.termux/files/usr/etc/resolv.conf',
+                b'/data/data/com.iossweet.sweet16/files/dns')
 SYSTEM_LIBS = {
     'libc.so', 'libm.so', 'libdl.so', 'liblog.so', 'libandroid.so', 'libz.so',
     'libEGL.so', 'libGLESv2.so', 'libGLESv3.so', 'libvulkan.so', 'libOpenSLES.so',
@@ -188,6 +195,14 @@ def main():
     for src, dst in outputs:
         shutil.copyfile(src, dst)   # unmodified ELF (see the module docstring)
         os.chmod(dst, 0o755)
+    if 'libslirp.so' in rename:
+        path = os.path.join(a.jnilibs, rename['libslirp.so'])
+        data = open(path, 'rb').read()
+        old, new = SLIRP_RESOLV
+        assert len(new) < len(old) and data.count(old) >= 1, 'libslirp: resolv.conf path not found'
+        data = data.replace(old, new.ljust(len(old), b'\0'))
+        open(path, 'wb').write(data)
+        print(f'libslirp.so: resolv.conf path -> {new.decode()}', file=sys.stderr)
     os.makedirs(os.path.join(a.assets, 'qemu'), exist_ok=True)
     with open(os.path.join(a.assets, 'qemu', 'libmap.txt'), 'w') as f:
         for so in sorted(rename):
@@ -202,7 +217,9 @@ def main():
             shutil.copyfile(os.path.join(km_src, k), os.path.join(km_dst, k))
     with open(os.path.join(a.assets, 'qemu', 'SOURCES.txt'), 'w') as f:
         f.write('QEMU and its libraries are prebuilt Termux packages (https://github.com/termux/termux-packages),\n'
-                'redistributed unmodified (byte for byte; some library file names changed). Package versions:\n\n')
+                'redistributed unmodified (byte for byte; some library file names changed), except that\n'
+                'libslirp.so reads its nameservers from /data/data/com.iossweet.sweet16/files/dns instead of\n'
+                'Termux\'s resolv.conf (one string, same length). Package versions:\n\n')
         f.write('\n'.join(sorted(sources)) + '\n')
     total = sum(os.path.getsize(d) for _, d in outputs)
     print(f'{len(outputs)} files, {total >> 20} MiB -> {a.jnilibs}', file=sys.stderr)

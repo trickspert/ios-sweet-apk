@@ -95,7 +95,9 @@ class VmActivity : Activity() {
             "Lock" to { tap(RfbClient.SC_POWER, RfbClient.KS_POWER) })
         row("Volume −" to { tap(RfbClient.SC_VOLUME_DOWN, RfbClient.KS_VOLUME_DOWN) },
             "Volume +" to { tap(RfbClient.SC_VOLUME_UP, RfbClient.KS_VOLUME_UP) })
-        row("Kernel log" to { startActivity(Intent(this, ConsoleActivity::class.java)) },
+        row("Internet check" to { NetCheckDialog.show(this, store) },
+            "Kernel log" to { startActivity(Intent(this, ConsoleActivity::class.java)) })
+        row("Performance" to { NetCheckDialog.showPerf(this, store) },
             "Stop iOS" to { VmService.stop(this); finish() })
         root.addView(controls, FrameLayout.LayoutParams(MATCH, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.TOP
@@ -108,15 +110,104 @@ class VmActivity : Activity() {
         }
     }
 
+    /**
+     * Direct display: map QEMU's RAM (DirectFrame) and hand every new frame to the
+     * view; the VNC picture stays as the fallback (and for input).
+     */
+    @Volatile private var directThread: Thread? = null
+    @Volatile private var directRun = false
+
+    private fun startDirect() {
+        if (!store.directDisplay || directThread?.isAlive == true) return
+        directRun = true
+        directThread = Thread({
+            var ram: GuestRam? = null
+            try {
+                var reader: DirectFrame? = null
+                var buf: java.nio.ByteBuffer? = null
+                var last = -1
+                var misses = 0
+                var tries = 0
+                var shown = 0
+                fun note(s: String) = try { store.launchLog.appendText("direct display: $s\n") } catch (_: Exception) {}
+                while (directRun && VmState.active) {
+                    if (reader == null) {
+                        val pid = VmService.qemuPid
+                        val f = try { if (pid > 0) DirectFrame.findQemuRam(pid) else null } catch (e: Exception) {
+                            if (tries == 0) note("cannot list /proc/$pid/fd: ${e.javaClass.simpleName} ${e.message}")
+                            null
+                        }
+                        if (f != null) {
+                            try {
+                                ram = GuestRam(f)
+                                reader = DirectFrame(ram!!)
+                                note("QEMU RAM ${f.path} mapped (${if (ram!!.writable) "read-write" else "READ-ONLY: the kernel keeps copying"})")
+                            } catch (e: Exception) {
+                                note("cannot open ${f.path}: ${e.javaClass.simpleName} ${e.message}; using the VNC picture")
+                                break
+                            }
+                        } else {
+                            if (++tries == 20) note("no QEMU RAM memfd in /proc/$pid/fd after 10 s (pid $pid); using the VNC picture")
+                            if (tries > 120) break
+                            Thread.sleep(500)
+                            continue
+                        }
+                    }
+                    reader.acknowledge()
+                    if (!reader.ready()) {
+                        Thread.sleep(250)   // the kernel writes it when the display driver starts
+                        continue
+                    }
+                    val seq = reader.seq()
+                    if (seq == last || seq and 1 != 0) {
+                        Thread.sleep(4)
+                        continue
+                    }
+                    val b = buf ?: java.nio.ByteBuffer.allocateDirect(MAX_FRAME_BYTES)
+                    buf = b
+                    val frame = reader.fetch(b)
+                    if (frame == null) {
+                        if (++misses > 2000) break   // ~10 s of unusable descriptors: give up, VNC stays
+                        Thread.sleep(5)
+                        continue
+                    }
+                    misses = 0
+                    last = frame.seq
+                    if (shown < 3 || (shown < 4 && frame.kind == 2)) {
+                        // A few sample pixels: tells a real picture from an all-black one in bug reports.
+                        val px = (0 until 5).map { k -> Integer.toHexString(b.getInt(((frame.height * (k + 1) / 6) * frame.width + frame.width / 2) * 4)) }
+                        note("frame ${frame.width}x${frame.height} kind ${frame.kind} seq ${frame.seq}, pixels $px")
+                        shown++
+                    }
+                    buf = view.directFrame(b, frame.width, frame.height)
+                }
+            } catch (_: InterruptedException) {
+            } catch (e: Throwable) {
+                android.util.Log.w("Sweet16", "direct display stopped", e)
+            } finally {
+                try { ram?.close() } catch (_: Exception) {}
+                view.directOff()
+            }
+        }, "direct-display").apply { isDaemon = true; start() }
+    }
+
+    private fun stopDirect() {
+        directRun = false
+        directThread?.interrupt()
+        directThread = null
+    }
+
     override fun onResume() {
         super.onResume()
         hideSystemBars()
+        startDirect()
         VmState.observe(stateListener)
         onState()
         connect()
     }
 
     override fun onPause() {
+        stopDirect()
         VmState.remove(stateListener)
         disconnect()
         super.onPause()
@@ -151,11 +242,19 @@ class VmActivity : Activity() {
                         client = c
                         view.client = c
                         main.post { showStatus(null) }
+                        // Ask for the next update right away: QEMU's VNC server only polls
+                        // the screen every 30 ms while updates are wanted and delivered,
+                        // and backs off (up to 3 s) when a poll finds no client waiting.
                         c.run(object : RfbClient.Listener {
                             override fun onResize(width: Int, height: Int) = view.resize(width, height)
-                            override fun onUpdate(x: Int, y: Int, w: Int, h: Int) = view.damage(x, y, w, h)
+                            override fun onUpdate(x: Int, y: Int, w: Int, h: Int) {
+                                // The kernel flips one bit of the last pixel every vsync to keep
+                                // that polling fast (SweetFramebuffer.cpp heartbeat): no redraw.
+                                if (h == 1 && w <= 16 && y == c.height - 1 && x + w == c.width) return
+                                view.damage(x, y, w, h)
+                            }
                             override fun onClosed(error: Throwable?) {}
-                        }, minFrameMs = 33)
+                        }, minFrameMs = 0)
                     } catch (e: Exception) {
                         // QEMU not ready yet, or it went away
                     }
@@ -246,6 +345,8 @@ class VmActivity : Activity() {
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
+        /** Largest direct-display frame: the presented 1125x2436 display, with margin. */
+        const val MAX_FRAME_BYTES = 1152 * 2560 * 4
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         @Suppress("unused") private val MONO = Typeface.MONOSPACE
     }

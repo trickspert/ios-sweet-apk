@@ -124,8 +124,10 @@ jobs:
             Install `Sweet16-iOS16-arm64.apk`, then follow the README (build the iOS disk from your own
             iPhone X 16.7.16 IPSW with Termux, Import, pick DT-d22ap.bin, Start). No Apple files are included.
 
-            New in this build: Fast mode (Settings, on by default) - less kernel debugging work and no
-            crash-looping bluetoothd / fairplayd.H2, so iOS boots and runs faster. Installs over earlier
+            New in this build: real date and time, ~30 s faster boot, faster screen updates (VNC polling no
+            longer backs off), Direct display (frames from guest RAM, GPU scaling), photo sharing and a Notes
+            web app for iOS (http://10.0.2.2:16016), Internet check and Performance screens, a virtual
+            Ethernet card (iOS does not configure it yet; websites do not load). Installs over earlier
             builds; the imported iOS disk is kept. Older builds stay available below.
 
             Built from ${{ github.sha }} by run ${{ github.run_id }}.

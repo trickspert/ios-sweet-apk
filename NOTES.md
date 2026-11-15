@@ -2,6 +2,14 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-15 later: user confirmed it works (display etc.) -> PR #7 merged, release sweet16-build-31 <<<
+- 0090 CPU monitor (SWEET TOP every 10 s) + app Performance check; fast mode pgz=0; app always passes
+  interrupt-masked-debug-mode=0 (PC run panicked once "Processing of an interrupt ... took 15932560 ns").
+- APK built locally once (same keystore/cert, CI kernel, identical libqemu) to skip a kernel CI cycle.
+- PR #7 merged (dc53eba), android run 43669286580 -> release sweet16-build-31; older releases kept.
+- Open: iOS does not configure en0 (configd opens IONetworkStack, never brings en0 up/DHCP); perf data from
+  the phone (Performance screenshot) still pending; user to delete Sweet16bin release + test drafts.
+
 ### >>> 2026-11-15 ~05:30 UTC: phone: direct display black; 0089 handshake; network stops after configd opens the stack <<<
 - S25 with direct display on: black screen (iOS ran: backboardd created surface 2 1125x2436 BGRA, swaps).
   Kernel showed kind 2 (no panel copy) while the app evidently could not read QEMU's RAM -> VNC stayed black.

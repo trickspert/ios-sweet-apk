@@ -2,6 +2,19 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-15 ~05:30 UTC: phone: direct display black; 0089 handshake; network stops after configd opens the stack <<<
+- S25 with direct display on: black screen (iOS ran: backboardd created surface 2 1125x2436 BGRA, swaps).
+  Kernel showed kind 2 (no panel copy) while the app evidently could not read QEMU's RAM -> VNC stayed black.
+  Off: works again (home screen: only Photos, App Store, Settings, Phone, Safari, Messages - removable
+  Apple apps like Notes/Calendar/Clock/Camera are not on the user's disk or not registered).
+- 0089: app writes a counter at descriptor+0x38 (GuestRam rw); kernel zero-copies only while it changed
+  within 1 s (scanoutAppReading), else copies at sweetfb_hz. PC check: "direct display: the app reads frames
+  from RAM" only after the counter moved. App logs direct-display steps to the Launch log.
+- Internet check on the phone: en0 attached + "configd opened IONetworkStack", but no "turned en0 on", no
+  DHCP. Next: find why configd/IPConfiguration ignore en0 (pre-configured path not taken?); fallback
+  (300 s) result not reported yet.
+- CI run 43663694634; APK sent as Sweet16-display-fix-test.apk.
+
 ### >>> 2026-11-15 ~00:30 UTC: 0086 on the phone: Safari still loads nothing (no log given); 0087 + app <<<
 - User: Safari still loads nothing; asked for Notes app, Wi-Fi, "reverse engineered hardware acceleration",
   a real photo importer. Still no kernel log from the phone (asked repeatedly), so this round adds

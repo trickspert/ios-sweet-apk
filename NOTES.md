@@ -19,7 +19,17 @@
   - Not attempted: GPU acceleration (no virtual GPU path for CoreAnimation); @2x rendering (MobileGestalt
     cache) - only after networking/logs work. Photo import into the Photos library without iOS networking
     (kernel writing DCIM + rebuilding Photos.sqlite) judged too risky blind.
-- Commit 44ae365, CI run 43657614122, stage-test e56cd16.
+- Commit 44ae365, CI run 43657614122 (cancelled by the next push), stage-test e56cd16.
+- Direct display (0088 + app, commit 189c8a9, CI run 43658175782): "hardware acceleration" as far as it goes
+  here: QEMU RAM as memfd (-object memory-backend-memfd,id=ram0,share=on; -M ...,memory-backend=ram0; QEMU
+  names it /memfd:memory-backend-memfd), the app maps /proc/<pid>/fd/N read-only (GuestRam, 1 GB windows).
+  Kernel descriptor at FB+0x1600000 (magic 'S16D', seqlock, w/h/bpr/fmt, offset, runs of {pa,len}); kind 2 =
+  backboardd's single full-screen BGRA surface in place (getPhysicalSegment runs cached per surface id, no
+  copy, fFlushTicks=1 i.e. every vsync), kind 1 = the panel (copy path, power-off fade). App: VmView draws
+  the frame bitmap with a R<->B ColorMatrix (GPU scaling), touch mapped frame->VNC linearly; VNC remains for
+  input and fallback; QEMU failing on memfd -> store.directDisplay=false and relaunch. JVM tests:
+  DirectFrameTest (scattered pieces, seqlock), LiveDirectFrameTest (env SWEET16_QEMU_PID).
+  Kind 2 can only be checked on the phone (needs backboardd swaps).
 
 ### >>> 2026-11-14 ~23:30 UTC: phone test of 0085: no internet; 0086 = configd fix + VNC heartbeat + photo sharing <<<
 - User (S25): "nothing loads after 5 mins"; display 3-12 fps; asked for >=30 Hz, wallpaper/photos, Notes app.

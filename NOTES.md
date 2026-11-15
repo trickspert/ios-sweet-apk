@@ -30,6 +30,14 @@
   input and fallback; QEMU failing on memfd -> store.directDisplay=false and relaunch. JVM tests:
   DirectFrameTest (scattered pieces, seqlock), LiveDirectFrameTest (env SWEET16_QEMU_PID).
   Kind 2 can only be checked on the phone (needs backboardd swaps).
+- CI run 43658280624 green (kernel 53cca512..., APK versionCode 456519, same cert). PC checks with it:
+  - nettest, sweetnet=1 sweetnetwait=8: "iOS did not configure en0 within 8 s (DHCP request never sent):
+    kernel fallback", "kernel_task turned en0 on", address 10.0.2.15, "default route via 10.0.2.2 added";
+    nettest: DNS answer, HTTP 200 5 MB, default route yes.
+  - Direct display, DIRECT=1 + sweetfb_scanout=1, sweet-sh: "SWEET FB: direct display descriptor at
+    0x9d600000"; LiveDirectFrameTest (the app's Kotlin reader via /proc/<pid>/fd memfd) read kind 1 560x1218
+    in 5.5 ms; 0 differing samples vs QMP screendump.
+- APK sent as Sweet16-direct-display-notes-test.apk.
 
 ### >>> 2026-11-14 ~23:30 UTC: phone test of 0085: no internet; 0086 = configd fix + VNC heartbeat + photo sharing <<<
 - User (S25): "nothing loads after 5 mins"; display 3-12 fps; asked for >=30 Hz, wallpaper/photos, Notes app.

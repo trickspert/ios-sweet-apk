@@ -202,6 +202,7 @@ class MainActivity : Activity() {
         m.menu.add(0, 9, 6, "Share photos with iOS…")
         m.menu.add(0, 10, 6, "Notes app for iOS…")
         m.menu.add(0, 11, 6, "Internet check")
+        m.menu.add(0, 12, 6, "Performance check")
         m.menu.add(0, 7, 7, "Settings")
         m.setOnMenuItemClickListener {
             when (it.itemId) {
@@ -216,6 +217,7 @@ class MainActivity : Activity() {
                 9 -> pickPhotos()
                 10 -> notesInfo()
                 11 -> NetCheckDialog.show(this, store)
+                12 -> NetCheckDialog.showPerf(this, store)
             }
             true
         }

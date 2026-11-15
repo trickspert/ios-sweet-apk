@@ -11,6 +11,37 @@ import android.widget.TextView
 
 /** Shows NetCheck's report (kernel milestones + a DNS test from this phone). */
 object NetCheckDialog {
+    /** The kernel console log (whole file, a few MB at most). */
+    fun console(store: Store): String = try {
+        java.io.RandomAccessFile(store.consoleLog, "r").use { r ->
+            val len = r.length()
+            val b = ByteArray(minOf(len, 64L shl 20).toInt())
+            r.seek(len - b.size)
+            r.readFully(b)
+            String(b, Charsets.UTF_8)
+        }
+    } catch (e: Exception) { "" }
+
+    fun showPerf(activity: Activity, store: Store) {
+        Thread({
+            val text = PerfCheck.report(console(store), store.cores) +
+                "\nServices not started now (Settings): ${store.skipServices.ifBlank { "none" }}"
+            activity.runOnUiThread {
+                if (activity.isFinishing) return@runOnUiThread
+                val tv = TextView(activity).apply {
+                    this.text = text; textSize = 13f; typeface = Typeface.MONOSPACE; setTextIsSelectable(true); setPadding(40, 24, 40, 24)
+                }
+                AlertDialog.Builder(activity).setTitle("Performance check")
+                    .setView(ScrollView(activity).apply { addView(tv) })
+                    .setPositiveButton("Copy") { _, _ ->
+                        activity.getSystemService(ClipboardManager::class.java)
+                            .setPrimaryClip(ClipData.newPlainText("Sweet16 performance check", text))
+                    }
+                    .setNegativeButton("Close", null).show()
+            }
+        }, "perf-check").start()
+    }
+
     fun show(activity: Activity, store: Store) {
         Thread({
             val console = try {

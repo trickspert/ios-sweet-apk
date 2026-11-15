@@ -93,6 +93,7 @@ class ConsoleActivity : Activity() {
             addView(btn("Boot details") { bootDetails() })
             addView(btn("Copy log") { copyLog() })
             addView(btn("Internet check") { NetCheckDialog.show(this@ConsoleActivity, store) })
+            addView(btn("Performance") { NetCheckDialog.showPerf(this@ConsoleActivity, store) })
             addView(btn("Bottom") { follow = true; scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) } })
         }
         val inputRow = LinearLayout(this).apply {

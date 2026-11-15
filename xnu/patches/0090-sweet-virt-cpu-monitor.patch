@@ -1,0 +1,141 @@
+diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
+index 6ca9094..53a3a53 100644
+--- a/bsd/dev/sweet_virtio.c
++++ b/bsd/dev/sweet_virtio.c
+@@ -61,6 +61,8 @@
+ #include <sys/kern_event.h>
+ #include <sys/proc.h>
+ #include <net/route.h>
++#include <sys/proc_internal.h>
++#include <mach/task_info.h>
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -1037,6 +1039,119 @@ vnet_static_address(bool route)
+ 	}
+ }
+ 
++/*
++ * CPU monitor (boot-arg sweettop=N seconds, default 10 on sweet-virt, 0 =
++ * off): every N seconds one console line with the processes that used the
++ * most CPU, in % of one CPU, e.g.
++ *   SWEET TOP 10s: backboardd 92% SpringBoard 31% mds 12% ... total 160%
++ * The app's Performance check shows them: which iOS services are worth
++ * not starting (sweetnoexec) in the emulator.
++ */
++#define TOP_SLOTS       1024
++#define TOP_SHOW        8
++extern kern_return_t task_info(task_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
++
++static struct top_ent {
++	int pid;
++	uint32_t gen;
++	uint64_t last, delta;
++	char name[20];
++} top_tab[TOP_SLOTS];
++static uint32_t top_gen;
++static int top_chan;
++
++static int
++top_callout(proc_t p, __unused void *arg)
++{
++	task_t t = proc_task(p);
++	int pid = proc_pid(p);
++	if (t == TASK_NULL) {
++		return PROC_RETURNED;
++	}
++	task_absolutetime_info_data_t ti;
++	mach_msg_type_number_t n = TASK_ABSOLUTETIME_INFO_COUNT;
++	if (task_info(t, TASK_ABSOLUTETIME_INFO, (task_info_t)&ti, &n) != KERN_SUCCESS) {
++		return PROC_RETURNED;
++	}
++	uint64_t total = ti.total_user + ti.total_system;
++	struct top_ent *e = &top_tab[(unsigned)pid % TOP_SLOTS];
++	if (e->pid != pid || e->gen + 1 < top_gen) {
++		e->pid = pid;
++		e->last = total;
++		e->delta = 0;
++		strlcpy(e->name, proc_best_name(p), sizeof(e->name));
++	} else {
++		e->delta = total - e->last;
++		e->last = total;
++	}
++	e->gen = top_gen;
++	return PROC_RETURNED;
++}
++
++static void
++top_thread(void *arg, __unused wait_result_t wr)
++{
++	uint32_t secs = (uint32_t)(uintptr_t)arg;
++	uint64_t period;
++	nanoseconds_to_absolutetime((uint64_t)secs * NSEC_PER_SEC, &period);
++	for (;;) {
++		vio_sleep_ms(secs * 1000, (event_t)&top_chan);
++		top_gen++;
++		proc_iterate(PROC_ALLPROCLIST, top_callout, NULL, NULL, NULL);
++		if (top_gen < 2) {
++			continue;
++		}
++		char line[400];
++		int len = snprintf(line, sizeof(line), "SWEET TOP %us:", secs);
++		uint64_t sum = 0;
++		for (int i = 0; i < TOP_SLOTS; i++) {
++			if (top_tab[i].gen == top_gen) {
++				sum += top_tab[i].delta;
++			}
++		}
++		for (int k = 0; k < TOP_SHOW; k++) {
++			int best = -1;
++			for (int i = 0; i < TOP_SLOTS; i++) {
++				if (top_tab[i].gen == top_gen && top_tab[i].delta > 0 &&
++				    (best < 0 || top_tab[i].delta > top_tab[best].delta)) {
++					best = i;
++				}
++			}
++			if (best < 0) {
++				break;
++			}
++			uint32_t pct = (uint32_t)(top_tab[best].delta * 100 / period);
++			if (pct == 0) {
++				break;
++			}
++			len += snprintf(line + len, sizeof(line) - len, " %s %u%%", top_tab[best].name, pct);
++			top_tab[best].gen = top_gen - 1;      /* taken; restored below */
++			top_tab[best].delta |= 1ull << 63;
++		}
++		for (int i = 0; i < TOP_SLOTS; i++) {
++			if (top_tab[i].delta & (1ull << 63)) {
++				top_tab[i].delta &= ~(1ull << 63);
++				top_tab[i].gen = top_gen;
++			}
++		}
++		printf("%s total %u%%\n", line, (uint32_t)(sum * 100 / period));
++	}
++}
++
++static void
++sweet_top_start(void)
++{
++	uint32_t secs = 10;
++	thread_t thread;
++	PE_parse_boot_argn("sweettop", &secs, sizeof(secs));
++	if (secs == 0) {
++		return;
++	}
++	if (kernel_thread_start(top_thread, (void *)(uintptr_t)secs, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
+ /* bsd_init, once the network stack is up and before the root is mounted. */
+ void
+ sweet_vnet_init(void)
+@@ -1047,6 +1162,7 @@ sweet_vnet_init(void)
+ 	if (!sweet_virt_present()) {
+ 		return;
+ 	}
++	sweet_top_start();
+ 	PE_parse_boot_argn("sweetnet", &mode, sizeof(mode));
+ 	if (mode == 0) {
+ 		return;

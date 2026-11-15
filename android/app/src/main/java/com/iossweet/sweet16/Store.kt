@@ -209,7 +209,10 @@ class Store(private val context: Context) {
          * kernel samples every thread once per second (telemetry); the IOKit trace and the
          * SpringBoard/backboardd stack sampler are bring-up diagnostics.
          */
-        val FAST_BOOT_ARGS = listOf("telemetry_sample_all_tasks=0", "sweetiolog=-", "sweetsample=-")
+        val FAST_BOOT_ARGS = listOf("telemetry_sample_all_tasks=0", "sweetiolog=-", "sweetsample=-",
+            // DEVELOPMENT kernels sample allocations into guard pages (PGZ): page remaps and
+            // TLB shootdowns across all virtual CPUs, expensive in emulation.
+            "pgz=0")
 
         /** Developer boot default: verbose kernel, console on the PL011, RAM disk root. */
         const val DEV_BOOT_ARGS = "-v debug=0xc serial=3 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0"

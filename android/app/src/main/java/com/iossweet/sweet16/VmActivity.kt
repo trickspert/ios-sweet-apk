@@ -97,7 +97,8 @@ class VmActivity : Activity() {
             "Volume +" to { tap(RfbClient.SC_VOLUME_UP, RfbClient.KS_VOLUME_UP) })
         row("Internet check" to { NetCheckDialog.show(this, store) },
             "Kernel log" to { startActivity(Intent(this, ConsoleActivity::class.java)) })
-        row("Stop iOS" to { VmService.stop(this); finish() })
+        row("Performance" to { NetCheckDialog.showPerf(this, store) },
+            "Stop iOS" to { VmService.stop(this); finish() })
         root.addView(controls, FrameLayout.LayoutParams(MATCH, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.TOP
             setMargins(dp(12), dp(28), dp(12), 0)

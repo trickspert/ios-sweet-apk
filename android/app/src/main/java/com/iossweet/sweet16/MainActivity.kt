@@ -200,6 +200,8 @@ class MainActivity : Activity() {
             m.menu.add(0, 5, 5, "Import iOS disk…")
         }
         m.menu.add(0, 9, 6, "Share photos with iOS…")
+        m.menu.add(0, 10, 6, "Notes app for iOS…")
+        m.menu.add(0, 11, 6, "Internet check")
         m.menu.add(0, 7, 7, "Settings")
         m.setOnMenuItemClickListener {
             when (it.itemId) {
@@ -212,6 +214,8 @@ class MainActivity : Activity() {
                 7 -> startActivity(Intent(this, SettingsActivity::class.java))
                 8 -> bootDetails()
                 9 -> pickPhotos()
+                10 -> notesInfo()
+                11 -> NetCheckDialog.show(this, store)
             }
             true
         }
@@ -270,6 +274,15 @@ class MainActivity : Activity() {
         if (VmState.active || ImportJob.running) return
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
         startActivityForResult(i, req)
+    }
+
+    private fun notesInfo() {
+        AlertDialog.Builder(this).setTitle("Notes app for iOS")
+            .setMessage("While iOS runs, open Safari in iOS and go to\n\n${ShareServer.NOTES_URL}\n\n" +
+                "Then tap Share (the square with the arrow) → Add to Home Screen → Add. A Notes icon appears on " +
+                "the iOS home screen and opens like an app.\n\nNotes are kept in iOS and also saved here in Sweet16, " +
+                "so they survive a new iOS disk. Needs Settings → Internet for iOS (no internet connection is needed).")
+            .setPositiveButton("OK", null).show()
     }
 
     @Suppress("DEPRECATION")

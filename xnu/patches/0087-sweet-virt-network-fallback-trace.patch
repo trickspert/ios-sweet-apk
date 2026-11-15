@@ -1,0 +1,195 @@
+diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
+index a4fdaa0..6ca9094 100644
+--- a/bsd/dev/sweet_virtio.c
++++ b/bsd/dev/sweet_virtio.c
+@@ -59,6 +59,8 @@
+ #include <net/dlil.h>
+ #include <netinet/in.h>
+ #include <sys/kern_event.h>
++#include <sys/proc.h>
++#include <net/route.h>
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -682,6 +684,12 @@ sweet_virt_start(void)
+  * Boot-arg sweetnet: 0 = off, 1 = iOS configures en0 (DHCP from configd;
+  * default), 2 = also give it 10.0.2.15/24 in the kernel (Developer boot
+  * test without configd).
++ *
++ * Fallback: if en0 still has no IPv4 address sweetnetwait seconds after it
++ * was attached (default 300; 0 = never), the kernel gives it QEMU's
++ * standard 10.0.2.15/24 and a default route through 10.0.2.2 itself. iOS
++ * then reaches addresses (e.g. the Android app's pages at 10.0.2.2) but
++ * has no DNS server unless configd sets one.
+  */
+ #define VIRTIO_NET_F_MAC        (1u << 5)
+ #define VNET_HDR                12
+@@ -703,6 +711,9 @@ static struct {
+ 	uint64_t rx_frames, tx_frames, tx_drops;
+ 	uint32_t seen;          /* VN_SEEN_* milestones already logged */
+ 	uint32_t ipv4;          /* en0's address as last logged */
++	uint32_t wait_s;        /* sweetnetwait */
++	bool fallback_done;
++	bool up_logged;
+ } vn;
+ 
+ /*
+@@ -892,7 +903,7 @@ vnet_output(ifnet_t ifp, mbuf_t m)
+ }
+ 
+ static errno_t
+-vnet_ioctl(ifnet_t ifp __unused, unsigned long cmd, void *data)
++vnet_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
+ {
+ 	switch (cmd) {
+ 	case SIOCGIFMEDIA32:
+@@ -914,9 +925,16 @@ vnet_ioctl(ifnet_t ifp __unused, unsigned long cmd, void *data)
+ 		ifmr->ifm_count = 1;
+ 		return 0;
+ 	}
++	case SIOCSIFFLAGS:
++		if ((ifnet_flags(ifp) & IFF_UP) && !vn.up_logged) {
++			char pname[20];
++			proc_selfname(pname, sizeof(pname));
++			vn.up_logged = true;
++			printf("SWEET NET: %s turned en0 on\n", pname);
++		}
++		return 0;
+ 	case SIOCSIFADDR:
+ 	case SIOCAIFADDR:
+-	case SIOCSIFFLAGS:
+ 	case SIOCADDMULTI:
+ 	case SIOCDELMULTI:
+ 		return 0;
+@@ -930,15 +948,28 @@ vnet_detach(ifnet_t ifp __unused)
+ {
+ }
+ 
++static void vnet_static_address(bool route);
++
+ static void
+ vnet_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+-	uint64_t next_check = 0, period;
++	uint64_t next_check = 0, period, fallback_at = 0;
+ 	nanoseconds_to_absolutetime(2 * NSEC_PER_SEC, &period);
++	if (vn.wait_s) {
++		nanoseconds_to_absolutetime((uint64_t)vn.wait_s * NSEC_PER_SEC, &fallback_at);
++		fallback_at += mach_absolute_time();
++	}
+ 	for (;;) {
+ 		if (mach_absolute_time() >= next_check) {
+ 			vnet_check_address();
+ 			next_check = mach_absolute_time() + period;
++			if (fallback_at && !vn.fallback_done && vn.ipv4 == 0 && mach_absolute_time() >= fallback_at) {
++				vn.fallback_done = true;
++				printf("SWEET NET: iOS did not configure en0 within %u s (DHCP request %s): kernel fallback, "
++				    "no DNS server\n", vn.wait_s, (vn.seen & VN_SEEN_DHCP_OUT) ? "sent, no address" : "never sent");
++				vnet_static_address(true);
++				vnet_check_address();
++			}
+ 		}
+ 		unsigned n = vnet_rx();
+ 		lck_mtx_lock(vn.lock);
+@@ -956,12 +987,18 @@ vnet_thread(__unused void *arg, __unused wait_result_t wr)
+ 	}
+ }
+ 
+-/* Developer boot test (sweetnet=2): en0 10.0.2.15/24, like QEMU's DHCP would. */
++/*
++ * en0 10.0.2.15/24, like QEMU's DHCP would: Developer boot test (sweetnet=2)
++ * and the fallback (with a default route through QEMU's router 10.0.2.2).
++ */
+ static void
+-vnet_static_address(void)
++vnet_static_address(bool route)
+ {
+ 	errno_t err = proto_plumb(PF_INET, vn.ifp);
+ 	socket_t so = NULL;
++	if (err == EEXIST) {
++		err = 0;        /* configd plumbed IPv4 already */
++	}
+ 	if (err == 0) {
+ 		err = sock_socket(PF_INET, SOCK_DGRAM, 0, NULL, NULL, &so);
+ 	}
+@@ -986,6 +1023,18 @@ vnet_static_address(void)
+ 	}
+ 	ifnet_set_flags(vn.ifp, IFF_UP, IFF_UP);
+ 	printf("SWEET NET: en0 10.0.2.15/24 %s (err %d)\n", err ? "NOT configured" : "up", err);
++	if (route && err == 0) {
++		struct sockaddr_in dst, gw, mask;
++		bzero(&dst, sizeof(dst));
++		dst.sin_len = sizeof(dst);
++		dst.sin_family = AF_INET;
++		gw = dst;
++		mask = dst;
++		gw.sin_addr.s_addr = htonl(0x0a000202);          /* 10.0.2.2 */
++		int rerr = rtrequest(RTM_ADD, (struct sockaddr *)&dst, (struct sockaddr *)&gw,
++		    (struct sockaddr *)&mask, RTF_UP | RTF_STATIC | RTF_GATEWAY, NULL);
++		printf("SWEET NET: default route via 10.0.2.2 %s (err %d)\n", rerr ? "NOT added" : "added", rerr);
++	}
+ }
+ 
+ /* bsd_init, once the network stack is up and before the root is mounted. */
+@@ -1002,6 +1051,11 @@ sweet_vnet_init(void)
+ 	if (mode == 0) {
+ 		return;
+ 	}
++	vn.wait_s = 300;
++	PE_parse_boot_argn("sweetnetwait", &vn.wait_s, sizeof(vn.wait_s));
++	if (mode == 2) {
++		vn.wait_s = 0;
++	}
+ 	for (uint32_t i = 0; i < vt.count && !vn.regs; i++) {
+ 		vm_offset_t r = vio_find(i, VIRTIO_ID_NET);
+ 		if (!r) {
+@@ -1091,7 +1145,7 @@ sweet_vnet_init(void)
+ 		thread_deallocate(thread);
+ 	}
+ 	if (mode == 2) {
+-		vnet_static_address();
++		vnet_static_address(false);
+ 	}
+ 	printf("SWEET NET: en0 attached (sweetnet=%u)\n", mode);
+ }
+diff --git a/iokit/Kernel/arm/SweetNet.cpp b/iokit/Kernel/arm/SweetNet.cpp
+index 9005942..c498b5f 100644
+--- a/iokit/Kernel/arm/SweetNet.cpp
++++ b/iokit/Kernel/arm/SweetNet.cpp
+@@ -37,6 +37,7 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
++#include <sys/proc.h>
+ 
+ class IONetworkController : public IOService {
+ 	OSDeclareDefaultStructors(IONetworkController);
+@@ -71,11 +72,28 @@ OSDefineMetaClassAndStructors(IONetworkStack, IOService);
+ class IONetworkStackUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IONetworkStackUserClient);
+ public:
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+ 	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+ 	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
+ };
+ OSDefineMetaClassAndStructors(IONetworkStackUserClient, IOUserClient);
+ 
++bool
++IONetworkStackUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	static uint32_t logged;
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	if (logged < 4) {
++		char pname[20];
++		logged++;
++		proc_selfname(pname, sizeof(pname));
++		IOLog("SWEET NET: %s opened IONetworkStack (configd's InterfaceNamer)\n", pname);
++	}
++	return true;
++}
++
+ IOReturn
+ IONetworkStackUserClient::clientClose(void)
+ {

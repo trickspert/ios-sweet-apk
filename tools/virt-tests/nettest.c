@@ -5,6 +5,10 @@
  *   1. gettimeofday -> the date (PL031 RTC, SweetPlatformExpert.cpp)
  *   2. DNS query for example.com to QEMU's resolver 10.0.2.3 (UDP)
  *   3. HTTP GET from the host, 10.0.2.2:8080 (TCP through QEMU's NAT)
+ *   4. a default route exists (UDP connect to 1.1.1.1)
+ *
+ * It first waits (up to 10 minutes) until en0 has an address, e.g. from the
+ * kernel's fallback (sweetnetwait=N) when nothing runs DHCP.
  *
  * Boot with sweetnet=2 (the kernel gives en0 10.0.2.15/24) and QEMU
  * -netdev user,id=n0 -device virtio-net-device,netdev=n0.
@@ -167,6 +171,56 @@ test_time(void)
 }
 
 static void
+sleep_s(long secs)
+{
+	long tv[2] = { secs, 0 };
+	sc(SYS_select, 0, 0, 0, 0, (long)tv, 0);
+}
+
+/* UDP connect: 0 if there is a route to a.b.c.d, else the error. */
+static long
+route_to(u8 a, u8 b, u8 c, u8 d)
+{
+	long fd = sc(SYS_socket, 2, 2, 0, 0, 0, 0);
+	if (fd < 0) {
+		return fd;
+	}
+	struct sockaddr_in to = sa(a, b, c, d, 53);
+	long r = sc(SYS_connect, fd, (long)&to, sizeof(to), 0, 0, 0);
+	sc(6, fd, 0, 0, 0, 0, 0);       /* close */
+	return r;
+}
+
+static void
+wait_for_address(void)
+{
+	long waited = 0;
+	while (route_to(10, 0, 2, 3) != 0 && waited < 600) {
+		if (waited == 0) {
+			put("nettest: waiting for an address on en0...\n");
+		}
+		sleep_s(2);
+		waited += 2;
+	}
+	put("nettest: en0 ");
+	put(route_to(10, 0, 2, 3) == 0 ? "has an address" : "still has NO address");
+	put(" after ");
+	putn((unsigned long)waited, 1);
+	put(" s\n");
+}
+
+static void
+test_route(void)
+{
+	long r = route_to(1, 1, 1, 1);
+	put(r == 0 ? "nettest: default route: yes\n" : "nettest: default route: no (error ");
+	if (r != 0) {
+		putn((unsigned long)-r, 1);
+		put(")\n");
+	}
+}
+
+static void
 test_dns(void)
 {
 	u8 q[64], a[512];
@@ -293,8 +347,10 @@ _start(void)
 	}
 	put("\n*** nettest: sweet-virt clock and network check ***\n");
 	test_time();
+	wait_for_address();
 	test_dns();
 	test_http();
+	test_route();
 	put("nettest: done\n");
 	for (;;) {
 		long tv[2] = { 3600, 0 };

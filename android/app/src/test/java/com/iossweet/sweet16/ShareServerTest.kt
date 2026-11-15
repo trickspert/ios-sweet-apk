@@ -44,6 +44,35 @@ class ShareServerTest {
     }
 
     @Test
+    fun notesAppSavesAndLoads() {
+        val root = Files.createTempDirectory("share").toFile()
+        val dir = File(root, "share").apply { mkdirs() }
+        val s = ShareServer(dir, 0)
+        s.start()
+        try {
+            val (pc, page) = get(s.boundPort, "/notes")
+            assertEquals(200, pc)
+            assertTrue(String(page).contains("apple-mobile-web-app-capable"))
+            val (ic, icon) = get(s.boundPort, "/notes-icon.png")
+            assertEquals(200, ic)
+            assertEquals(0x89.toByte(), icon[0])
+            assertEquals("[]", String(get(s.boundPort, "/api/notes").second))
+            val json = "[{\"id\":\"a1\",\"text\":\"Hello \u00e9\",\"updated\":1}]"
+            val c = URL("http://127.0.0.1:${s.boundPort}/api/notes").openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
+            c.requestMethod = "POST"
+            c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.outputStream.use { it.write(json.toByteArray()) }
+            assertEquals(200, c.responseCode)
+            assertEquals(json, String(get(s.boundPort, "/api/notes").second))
+            assertEquals(json, File(root, "notes.json").readText())
+        } finally {
+            s.stop()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun emptyDirectoryExplainsWhatToDo() {
         val dir = Files.createTempDirectory("share").toFile()
         val s = ShareServer(dir, 0)

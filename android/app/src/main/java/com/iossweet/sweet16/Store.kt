@@ -39,6 +39,8 @@ class Store(private val context: Context) {
     val dnsFile = File(files, "dns")
     /** Photos picked on Android for iOS, served at ShareServer.IOS_URL while iOS runs. */
     val shareDir = File(files, "share")
+    /** Notes of the iOS Notes web app (ShareServer /notes). */
+    val notesFile = File(files, "notes.json")
     val bootDir = File(context.cacheDir, "boot")
     val selftestRamdisk = File(files, "sweet-sh")
     val vncSocket = File(context.cacheDir, "vnc.sock")

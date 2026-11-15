@@ -216,7 +216,7 @@ class VmService : Service() {
         stopShareServer()
         store.shareDir.mkdirs()
         try {
-            share = ShareServer(store.shareDir).also { it.start() }
+            share = ShareServer(store.shareDir, ShareServer.PORT, store.notesFile).also { it.start() }
             log.line("photo sharing for iOS: ${ShareServer.IOS_URL} (${store.shareDir.list()?.size ?: 0} files)")
         } catch (e: Exception) {
             log.line("photo sharing not started: ${e.message}")

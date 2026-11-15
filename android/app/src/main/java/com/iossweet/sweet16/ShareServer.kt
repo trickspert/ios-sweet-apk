@@ -19,7 +19,12 @@ import java.net.URLDecoder
  *
  * No Android dependencies: tested on the JVM (ShareServerTest).
  */
-class ShareServer(private val dir: File, private val port: Int = PORT) {
+class ShareServer(
+    private val dir: File,
+    private val port: Int = PORT,
+    /** Notes of the /notes web app (NotesPage), saved here as JSON. */
+    private val notesFile: File = File(dir.parentFile ?: dir, "notes.json"),
+) {
     @Volatile private var server: ServerSocket? = null
 
     /** The port actually bound (useful with port 0 in tests). */
@@ -46,12 +51,18 @@ class ShareServer(private val dir: File, private val port: Int = PORT) {
         c.soTimeout = 15_000
         val inp = BufferedInputStream(c.getInputStream())
         val request = readLine(inp) ?: return
+        var length = 0
         while (true) {
             val h = readLine(inp) ?: return
             if (h.isEmpty()) break
+            if (h.startsWith("content-length:", ignoreCase = true)) length = h.substringAfter(':').trim().toIntOrNull() ?: 0
         }
         val parts = request.split(' ')
         val out = c.getOutputStream()
+        if (parts.size >= 2 && parts[0] == "POST" && parts[1] == "/api/notes") {
+            saveNotes(inp, length, out)
+            return
+        }
         if (parts.size < 2 || (parts[0] != "GET" && parts[0] != "HEAD")) {
             reply(out, 405, "text/plain", "method not allowed\n".toByteArray(), parts.getOrNull(0) == "HEAD")
             return
@@ -60,6 +71,12 @@ class ShareServer(private val dir: File, private val port: Int = PORT) {
         val path = parts[1].substringBefore('?')
         when {
             path == "/" || path == "/index.html" -> reply(out, 200, "text/html; charset=utf-8", index().toByteArray(), head)
+            path == "/notes" || path == "/notes/" -> reply(out, 200, "text/html; charset=utf-8", NotesPage.HTML.toByteArray(), head)
+            path == "/notes-icon.png" || path == "/apple-touch-icon.png" -> reply(out, 200, "image/png", NotesPage.ICON, head)
+            path == "/api/notes" -> {
+                val body = synchronized(this) { if (notesFile.isFile) notesFile.readBytes() else "[]".toByteArray() }
+                reply(out, 200, "application/json", body, head)
+            }
             path.startsWith("/f/") -> {
                 val name = URLDecoder.decode(path.removePrefix("/f/"), "UTF-8")
                 val f = File(dir, name)
@@ -71,6 +88,32 @@ class ShareServer(private val dir: File, private val port: Int = PORT) {
             }
             else -> reply(out, 404, "text/plain", "not found\n".toByteArray(), head)
         }
+    }
+
+    private fun saveNotes(inp: BufferedInputStream, length: Int, out: OutputStream) {
+        if (length <= 0 || length > MAX_NOTES) {
+            reply(out, 413, "text/plain", "too large\n".toByteArray(), false)
+            return
+        }
+        val body = ByteArray(length)
+        var n = 0
+        while (n < length) {
+            val r = inp.read(body, n, length - n)
+            if (r < 0) return
+            n += r
+        }
+        val text = String(body, Charsets.UTF_8).trim()
+        if (!text.startsWith("[") || !text.endsWith("]")) {
+            reply(out, 400, "text/plain", "expected a JSON array\n".toByteArray(), false)
+            return
+        }
+        synchronized(this) {
+            notesFile.parentFile?.mkdirs()
+            val tmp = File(notesFile.path + ".tmp")
+            tmp.writeBytes(body)
+            tmp.renameTo(notesFile)
+        }
+        reply(out, 200, "application/json", "{\"ok\":true}".toByteArray(), false)
     }
 
     private fun files(): List<File> =
@@ -86,7 +129,10 @@ class ShareServer(private val dir: File, private val port: Int = PORT) {
         append(".g{display:grid;grid-template-columns:1fr 1fr;gap:8px}")
         append(".g a{display:block}.g img{width:100%;border-radius:8px;display:block}")
         append(".f{padding:12px;border-radius:8px;background:#222;color:#9cf;word-break:break-all}")
-        append("</style></head><body><h1>Photos from Android</h1>")
+        append(".card{display:block;padding:14px 16px;margin:8px 0 18px;border-radius:12px;background:#2a2410;color:#ffd24d;text-decoration:none}")
+        append("</style></head><body>")
+        append("<a class=\"card\" href=\"/notes\"><b>Notes</b><br><span style=\"color:#ccc\">Open, then Share &rarr; Add to Home Screen for a Notes app icon.</span></a>")
+        append("<h1>Photos from Android</h1>")
         if (list.isEmpty()) {
             append("<p>Nothing shared yet. In Sweet16 on Android: &#8942; &rarr; Share photos with iOS&hellip;, then reload this page.</p>")
         } else {
@@ -113,7 +159,7 @@ class ShareServer(private val dir: File, private val port: Int = PORT) {
     }
 
     private fun reply(out: OutputStream, code: Int, type: String, body: ByteArray, head: Boolean) {
-        val reason = when (code) { 200 -> "OK"; 404 -> "Not Found"; else -> "Method Not Allowed" }
+        val reason = when (code) { 200 -> "OK"; 400 -> "Bad Request"; 404 -> "Not Found"; 413 -> "Payload Too Large"; else -> "Method Not Allowed" }
         out.write("HTTP/1.0 $code $reason\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n".toByteArray())
         if (!head) out.write(body)
         out.flush()
@@ -136,6 +182,8 @@ class ShareServer(private val dir: File, private val port: Int = PORT) {
         /** Seen from iOS as http://10.0.2.2:16016 (QEMU maps 10.0.2.2 to this phone's loopback). */
         const val PORT = 16016
         const val IOS_URL = "http://10.0.2.2:16016"
+        const val NOTES_URL = "http://10.0.2.2:16016/notes"
+        private const val MAX_NOTES = 4 shl 20
 
         fun contentType(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
             "jpg", "jpeg" -> "image/jpeg"

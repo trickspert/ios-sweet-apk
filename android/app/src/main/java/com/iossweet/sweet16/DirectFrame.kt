@@ -19,7 +19,9 @@ import java.nio.channels.FileChannel
  * No Android dependencies (tested on the JVM with a plain file).
  */
 class GuestRam(file: File, private val ramBase: Long = RAM_BASE) : Closeable {
-    private val raf = RandomAccessFile(file, "r")
+    /** Read-write when allowed: the app's "I am reading" counter goes to the descriptor. */
+    private val raf = try { RandomAccessFile(file, "rw") } catch (e: Exception) { RandomAccessFile(file, "r") }
+    val writable: Boolean = try { raf.channel.write(ByteBuffer.allocate(0), 0); true } catch (e: Exception) { false }
     private val channel = raf.channel
     private val size = channel.size()
     private val windows = arrayOfNulls<MappedByteBuffer>(((size + WINDOW - 1) / WINDOW).toInt())
@@ -51,6 +53,14 @@ class GuestRam(file: File, private val ramBase: Long = RAM_BASE) : Closeable {
         return b.getInt(0)
     }
 
+    /** Write a 32-bit value into guest RAM; false if not possible. */
+    fun write32(pa: Long, v: Int): Boolean = try {
+        val b = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(0, v)
+        channel.write(b, pa - ramBase) == 4
+    } catch (e: Exception) {
+        false
+    }
+
     override fun close() {
         channel.close()
         raf.close()
@@ -70,6 +80,13 @@ class DirectFrame(private val ram: GuestRam, private val descPa: Long = DESCRIPT
 
     /** True once the kernel has written the descriptor. */
     fun ready(): Boolean = try { ram.u32(descPa) == MAGIC && ram.u32(descPa + 4) == 1 } catch (e: Exception) { false }
+
+    /**
+     * Tell the kernel the app reads frames from RAM (it then stops copying them
+     * into the panel; it copies again ~1 s after the counter stops changing).
+     */
+    private var ack = 0
+    fun acknowledge(): Boolean = ram.write32(descPa + 0x38, ++ack)
 
     /** The descriptor's sequence number (cheap; changes with every new frame). */
     fun seq(): Int = ram.u32(descPa + 8)

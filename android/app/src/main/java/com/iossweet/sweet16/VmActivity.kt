@@ -126,18 +126,33 @@ class VmActivity : Activity() {
                 var buf: java.nio.ByteBuffer? = null
                 var last = -1
                 var misses = 0
+                var tries = 0
+                var shown = 0
+                fun note(s: String) = try { store.launchLog.appendText("direct display: $s\n") } catch (_: Exception) {}
                 while (directRun && VmState.active) {
                     if (reader == null) {
                         val pid = VmService.qemuPid
-                        val f = if (pid > 0) DirectFrame.findQemuRam(pid) else null
+                        val f = try { if (pid > 0) DirectFrame.findQemuRam(pid) else null } catch (e: Exception) {
+                            if (tries == 0) note("cannot list /proc/$pid/fd: ${e.javaClass.simpleName} ${e.message}")
+                            null
+                        }
                         if (f != null) {
-                            ram = GuestRam(f)
-                            reader = DirectFrame(ram)
+                            try {
+                                ram = GuestRam(f)
+                                reader = DirectFrame(ram!!)
+                                note("QEMU RAM ${f.path} mapped (${if (ram!!.writable) "read-write" else "READ-ONLY: the kernel keeps copying"})")
+                            } catch (e: Exception) {
+                                note("cannot open ${f.path}: ${e.javaClass.simpleName} ${e.message}; using the VNC picture")
+                                break
+                            }
                         } else {
+                            if (++tries == 20) note("no QEMU RAM memfd in /proc/$pid/fd after 10 s (pid $pid); using the VNC picture")
+                            if (tries > 120) break
                             Thread.sleep(500)
                             continue
                         }
                     }
+                    reader.acknowledge()
                     if (!reader.ready()) {
                         Thread.sleep(250)   // the kernel writes it when the display driver starts
                         continue
@@ -157,6 +172,12 @@ class VmActivity : Activity() {
                     }
                     misses = 0
                     last = frame.seq
+                    if (shown < 3 || (shown < 4 && frame.kind == 2)) {
+                        // A few sample pixels: tells a real picture from an all-black one in bug reports.
+                        val px = (0 until 5).map { k -> Integer.toHexString(b.getInt(((frame.height * (k + 1) / 6) * frame.width + frame.width / 2) * 4)) }
+                        note("frame ${frame.width}x${frame.height} kind ${frame.kind} seq ${frame.seq}, pixels $px")
+                        shown++
+                    }
                     buf = view.directFrame(b, frame.width, frame.height)
                 }
             } catch (_: InterruptedException) {

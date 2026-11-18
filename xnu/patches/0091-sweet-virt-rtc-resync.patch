@@ -1,0 +1,63 @@
+diff --git a/bsd/dev/sweet_virtio.c b/bsd/dev/sweet_virtio.c
+index 53a3a53..16dede3 100644
+--- a/bsd/dev/sweet_virtio.c
++++ b/bsd/dev/sweet_virtio.c
+@@ -1138,9 +1138,39 @@ top_thread(void *arg, __unused wait_result_t wr)
+ 	}
+ }
+ 
++/*
++ * Wall clock after a resume: the app can save the running machine and
++ * restore it later (Quick start); the guest's own clock then continues
++ * from the moment it was saved. QEMU's PL031 always follows the host, so
++ * every 5 s the calendar is set from it when they differ by more than 2 s.
++ */
++extern uint32_t sweet_rtc_seconds(void);
++static int rtcsync_chan;
++
++static void
++rtcsync_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	for (;;) {
++		vio_sleep_ms(5000, (event_t)&rtcsync_chan);
++		uint32_t rtc = sweet_rtc_seconds();
++		clock_sec_t secs;
++		clock_usec_t usecs;
++		clock_get_calendar_microtime(&secs, &usecs);
++		if (rtc != 0 && (secs + 2 < rtc || secs > (clock_sec_t)rtc + 2)) {
++			printf("SWEET RTC: calendar %lu -> %u (resumed after %ld s)\n", (unsigned long)secs, rtc,
++			    (long)rtc - (long)secs);
++			clock_set_calendar_microtime(rtc, 0);
++		}
++	}
++}
++
+ static void
+ sweet_top_start(void)
+ {
++	thread_t rthread;
++	if (kernel_thread_start(rtcsync_thread, NULL, &rthread) == KERN_SUCCESS) {
++		thread_deallocate(rthread);
++	}
+ 	uint32_t secs = 10;
+ 	thread_t thread;
+ 	PE_parse_boot_argn("sweettop", &secs, sizeof(secs));
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index f7560d8..e5b361c 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -45,6 +45,14 @@ sweet_rtc_probe(void)
+ 	IOLog("SWEET RTC: PL031 at 0x%x, UTC %u\n", SWEET_PL031_PA, p[PL031_DR / 4]);
+ }
+ 
++/* For the resync after a resume (bsd/dev/sweet_virtio.c): PL031 seconds, 0 without. */
++extern "C" uint32_t sweet_rtc_seconds(void);
++uint32_t
++sweet_rtc_seconds(void)
++{
++	return sweet_rtc != NULL ? sweet_rtc[PL031_DR / 4] : 0;
++}
++
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+ 

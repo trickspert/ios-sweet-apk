@@ -62,6 +62,10 @@ It starts a small Ubuntu VM (an unrooted phone can't mount disk images, the VM c
 
 Tap **Start**. You see the Apple logo for a long time on the first boot (about an hour, while iOS sets itself up), possibly a black screen, then the lock screen. Later boots are much faster: about 4 minutes on a Galaxy S25 Ultra, and quicker still with Fast mode. Touch works like an iPhone; your phone's **Back** = Home; the handle at the top gives Home, Lock, Volume, Internet check, Performance, Kernel log and Stop. If it gets stuck: handle → **Kernel log → Copy log**, and open an issue with the log.
 
+### Quick start
+
+With **Quick start** (Settings, on by default) **Stop** saves the running iOS to a file (1-3 GB) and the next **Start** resumes it in seconds instead of booting, like closing a laptop lid. The clock catches up by itself. A saved iOS is used once; changing settings, the kernel or the disk makes the next start a normal boot. The long first boot can also be split: Stop in the middle saves it, Start continues.
+
 ### Extras
 
 - **Photos from Android:** main screen ⋮ → **Share photos with iOS…**, then in iOS Safari open `http://10.0.2.2:16016`, touch and hold a photo → Add to Photos (then Settings → Wallpaper). Works without internet.

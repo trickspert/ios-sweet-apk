@@ -41,6 +41,17 @@ class Store(private val context: Context) {
     val shareDir = File(files, "share")
     /** Notes of the iOS Notes web app (ShareServer /notes). */
     val notesFile = File(files, "notes.json")
+    /** Quick start: the suspended machine (QEMU migration stream) and what it was booted with. */
+    val stateDir = File(files, "suspend")
+    val stateFile = File(stateDir, "state.bin")
+    val stateKeyFile = File(stateDir, "state.key")
+
+    /** Forget the suspended machine (it no longer matches the disk or the boot). */
+    fun discardState() {
+        stateFile.delete()
+        stateKeyFile.delete()
+        File(stateDir, "state.tmp").delete()
+    }
     val bootDir = File(context.cacheDir, "boot")
     val selftestRamdisk = File(files, "sweet-sh")
     val vncSocket = File(context.cacheDir, "vnc.sock")
@@ -79,6 +90,10 @@ class Store(private val context: Context) {
     var directDisplay: Boolean
         get() = bool("direct_display", true)
         set(v) = prefs.edit().putBoolean("direct_display", v).apply()
+    /** Stop saves the running iOS (suspend), Start resumes it in seconds. */
+    var quickStart: Boolean
+        get() = bool("quick_start", true)
+        set(v) = prefs.edit().putBoolean("quick_start", v).apply()
     var showKernelLog: Boolean
         get() = bool("kernel_log_over_ios", false)
         set(v) = prefs.edit().putBoolean("kernel_log_over_ios", v).apply()

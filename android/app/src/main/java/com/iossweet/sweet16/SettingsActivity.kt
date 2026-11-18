@@ -69,6 +69,12 @@ class SettingsActivity : Activity() {
             })
         })
 
+        switch("Quick start (Stop saves iOS, Start resumes it in seconds)", store.quickStart) {
+            store.quickStart = it
+            if (!it && !VmState.active) store.discardState()
+        }
+        note("Like closing a laptop lid: the running iOS is saved to a file (about 1-3 GB) when you stop it. " +
+            "Changing settings or the disk makes the next start a normal boot.")
         switch("Direct display (sharper, every frame, phone GPU scaling)", store.directDisplay) { store.directDisplay = it }
         note("Reads iOS's frames straight from the virtual machine's memory instead of the VNC picture. " +
             "Turn off if the screen looks wrong.")
@@ -107,7 +113,7 @@ class SettingsActivity : Activity() {
             AlertDialog.Builder(this)
                 .setTitle("Delete the iOS 16 disk?")
                 .setMessage("Everything inside iOS is lost. Import the image again to use iOS.")
-                .setPositiveButton("Delete") { _, _ -> if (!VmState.active) store.disk.delete(); build() }
+                .setPositiveButton("Delete") { _, _ -> if (!VmState.active) { store.disk.delete(); store.discardState() }; build() }
                 .setNegativeButton("Cancel", null)
                 .show()
         }

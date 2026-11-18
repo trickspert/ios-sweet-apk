@@ -2,6 +2,18 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-18: Quick start (suspend/resume) + 0091 clock resync <<<
+- User: videos got attention; wants a faster (first) boot. Quick start: Stop -> QMP stop + migrate
+  file:files/suspend/state.tmp -> rename state.bin + state.key (sha256 of kernel, user DT, boot-args, QEMU
+  args, disk path:length; NOT ram.bin: VirtAdt adds a random seed per boot). Start with matching key adds
+  -incoming file:..., polls query-migrate, cont, deletes the state (single use: iOS then writes the disk).
+  Mismatch / Developer boot / import / disk delete discard it. QMP helper skips event lines.
+- 0091: rtcsync thread every 5 s: calendar <- PL031 if off by > 2 s.
+- PC (QEMU 8.2, sweet-sh, kernel from run 44207908531): save 43 MB, restore completed < 1 s, shell answers,
+  "SWEET RTC: calendar ... (resumed after 85 s)".
+- First boot itself (~1 h) not yet analysed: needs a fresh import + Performance (SWEET TOP) screenshots.
+- APK sent: Sweet16-quick-start-test.apk (run 44207908531).
+
 ### >>> 2026-11-15 later: user confirmed it works (display etc.) -> PR #7 merged, release sweet16-build-31 <<<
 - 0090 CPU monitor (SWEET TOP every 10 s) + app Performance check; fast mode pgz=0; app always passes
   interrupt-masked-debug-mode=0 (PC run panicked once "Processing of an interrupt ... took 15932560 ns").

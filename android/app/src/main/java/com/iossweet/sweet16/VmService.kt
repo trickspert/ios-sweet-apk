@@ -132,7 +132,21 @@ class VmService : Service() {
             }
             // Exactly what runs, for "Boot details" and bug reports.
             store.lastLaunch.writeText(launch.describe(store))
-            val args = launch.args
+            // Quick start: resume the machine saved at the last Stop when it was booted the same way.
+            val key = quickKey(launch)
+            var resume = false
+            if (store.stateFile.isFile) {
+                if (store.quickStart && profile == Launch.IOS && store.stateKeyFile.isFile && store.stateKeyFile.readText() == key) {
+                    resume = true
+                    log.line("Quick start: resuming the saved iOS (${store.stateFile.length() shr 20} MB)")
+                } else {
+                    // A normal boot changes the disk: the saved machine would not match it any more.
+                    log.line("Quick start: the saved iOS does not match this boot (settings, kernel or disk changed): normal boot")
+                    store.discardState()
+                }
+            }
+            currentKey = if (profile == Launch.IOS) key else null
+            val args = if (resume) launch.args + listOf("-incoming", "file:" + store.stateFile.path) else launch.args
             log.line("command:\n" + launch.commandLine(store).prependIndent("    "))
             Log.i(TAG, "qemu " + args.joinToString(" "))
             val pb = ProcessBuilder(listOf(qemu.path) + args)
@@ -164,6 +178,32 @@ class VmService : Service() {
                     return
                 }
                 throw IllegalStateException("QEMU exited (${p.exitValue()}): " + tail)
+            }
+            if (resume) {
+                VmState.set(VmState.Phase.STARTING, "Resuming iOS (Quick start)", profile)
+                val r0 = System.currentTimeMillis()
+                var status = ""
+                while (p.isAliveCompat() && System.currentTimeMillis() - r0 < 180_000) {
+                    status = qmp(store, """{"execute":"query-migrate"}""")?.let {
+                        try { org.json.JSONObject(it).optJSONObject("return")?.optString("status") ?: "" } catch (e: Exception) { "" }
+                    } ?: ""
+                    if (status == "completed" || status == "failed") break
+                    Thread.sleep(200)
+                }
+                // The saved machine is used up either way: iOS now changes the disk.
+                store.discardState()
+                if (status == "completed") {
+                    qmp(store, """{"execute":"cont"}""")
+                    log.line("Quick start: resumed in ${System.currentTimeMillis() - r0} ms")
+                } else {
+                    log.line("Quick start: resume failed ($status): normal boot")
+                    p.destroyForcibly()
+                    p.waitForCompat(5000)
+                    process = null
+                    qemuPid = -1
+                    launch(profile, store, log)
+                    return
+                }
             }
             log.line("VNC socket ${if (store.vncSocket.exists()) "up" else "not up after 30 s"}; machine running")
             VmState.set(VmState.Phase.RUNNING, "QEMU is running (pid ${pidOf(p)})", profile)
@@ -269,13 +309,58 @@ class VmService : Service() {
         return p.exitValue() to out.toString()
     }
 
+    /** Boot fingerprint for Quick start: the boot image (kernel, boot-args, device tree) and QEMU's arguments. */
+    @Volatile private var currentKey: String? = null
+
+    private fun quickKey(launch: Launch): String {
+        // Not the boot image itself: its device tree has a new random seed every boot.
+        val store = Store(this)
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        md.update(store.kernelBytes())
+        if (store.userDeviceTree.isFile) md.update(store.userDeviceTree.readBytes())
+        md.update(launch.bootArgs.toByteArray())
+        md.update(launch.args.joinToString("\u0000").toByteArray())
+        md.update("${store.disk.path}:${store.disk.length()}".toByteArray())
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Quick start: save the running machine (QEMU migration to a file); true if saved. */
+    private fun suspendVm(store: Store, p: Process): Boolean {
+        val key = currentKey ?: return false
+        VmState.set(VmState.Phase.STOPPED, "Saving iOS for Quick start…")
+        store.stateDir.mkdirs()
+        val tmp = File(store.stateDir, "state.tmp")
+        tmp.delete()
+        val t0 = System.currentTimeMillis()
+        qmp(store, """{"execute":"stop"}""")
+        qmp(store, """{"execute":"migrate","arguments":{"uri":"file:${tmp.path}"}}""")
+        var status = ""
+        while (p.isAliveCompat() && System.currentTimeMillis() - t0 < 300_000) {
+            status = qmp(store, """{"execute":"query-migrate"}""")?.let {
+                try { org.json.JSONObject(it).optJSONObject("return")?.optString("status") ?: "" } catch (e: Exception) { "" }
+            } ?: ""
+            if (status == "completed" || status == "failed" || status == "cancelled") break
+            Thread.sleep(250)
+        }
+        val ok = status == "completed" && tmp.length() > 0 && tmp.renameTo(store.stateFile)
+        if (ok) store.stateKeyFile.writeText(key) else { tmp.delete(); store.discardState() }
+        try {
+            store.launchLog.appendText("Quick start: ${if (ok) "saved ${store.stateFile.length() shr 20} MB" else "not saved ($status)"} " +
+                "in ${System.currentTimeMillis() - t0} ms\n")
+        } catch (_: Exception) {}
+        return ok
+    }
+
     private fun stopVm() {
         val p = process
+        val wasRunning = VmState.phase == VmState.Phase.RUNNING
         VmState.set(VmState.Phase.STOPPED, "Stopping")
         if (p != null) {
             Thread({
+                val store = Store(this)
+                if (wasRunning && store.quickStart && currentKey != null) suspendVm(store, p)
                 // Ask QEMU to quit (writes back its disk cache), then make sure.
-                qmp(Store(this), """{"execute":"quit"}""")
+                qmp(store, """{"execute":"quit"}""")
                 if (!p.waitForCompat(5000)) p.destroyForcibly()
                 process = null
                 VmState.set(VmState.Phase.STOPPED, "The virtual machine stopped")
@@ -366,7 +451,9 @@ class VmService : Service() {
                 w.write("{\"execute\":\"qmp_capabilities\"}\n"); w.flush()
                 r.readLine()
                 w.write(command + "\n"); w.flush()
-                r.readLine()
+                var line = r.readLine()
+                while (line != null && line.contains("\"event\"")) line = r.readLine()   // STOP, RESUME, MIGRATION ...
+                line
             }
         } catch (e: Exception) {
             null

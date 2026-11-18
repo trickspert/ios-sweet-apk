@@ -265,7 +265,8 @@ class MainActivity : Activity() {
     private fun confirmStop() {
         AlertDialog.Builder(this)
             .setTitle("Stop iOS 16?")
-            .setMessage("Like pulling the battery: apps lose unsaved work.")
+            .setMessage(if (store.quickStart) "iOS is saved (Quick start): the next Start resumes it in seconds."
+                else "Like pulling the battery: apps lose unsaved work.")
             .setPositiveButton("Stop") { _, _ -> VmService.stop(this) }
             .setNegativeButton("Cancel", null)
             .show()

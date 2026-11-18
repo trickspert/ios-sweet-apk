@@ -55,6 +55,7 @@ class Importer(private val context: Context, private val store: Store) {
     }
 
     fun importDisk(source: InputStream, total: Long, progress: Progress) {
+        store.discardState()
         store.diskDir.mkdirs()
         val tmp = File(store.diskDir, "import.tmp")
         tmp.delete()

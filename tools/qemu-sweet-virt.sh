@@ -11,7 +11,9 @@
 # Env: CPUS (default 4), DISK=none to boot without the virtio disk, NET=none
 # without the network (default: QEMU user networking = NAT, like the app),
 # DIRECT=1: guest RAM in a memfd like the app's direct display (boot-arg
-# sweetfb_scanout=1; read frames with /proc/<qemu pid>/fd, see DirectFrame.kt).
+# sweetfb_scanout=1; read frames with /proc/<qemu pid>/fd, see DirectFrame.kt),
+# EXTRA="..." more QEMU options (e.g. -incoming file:STATE to resume a saved
+# machine, like the app's Quick start).
 set -eu
 bundle=$(cd "$1" && pwd)
 disk=$2
@@ -71,4 +73,4 @@ exec qemu-system-aarch64 \
     -device virtio-tablet-device -device virtio-keyboard-device \
     -device "loader,file=$bundle/ram.bin,addr=$phys,force-raw=on" \
     -device "loader,file=$bundle/stub.bin,addr=$stub,force-raw=on" \
-    -device "loader,addr=$stub,cpu-num=0"
+    -device "loader,addr=$stub,cpu-num=0" ${EXTRA:-}

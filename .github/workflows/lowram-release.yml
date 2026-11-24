@@ -1,0 +1,50 @@
+name: lowram-release
+
+# Publishes the APK of one android.yml run as a separate release for budget
+# phones (2-6 GB RAM, Android 8+), not marked "Latest". The app picks smaller
+# defaults by itself on those phones (Store.defaultRamMb / defaultCores).
+
+on:
+  push:
+    branches: ["claude/**"]
+    paths: [".github/workflows/lowram-release.yml"]
+
+env:
+  RUN_ID: "0"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Wait for the android run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while :; do
+            s=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.status + " " + (.conclusion // "")')
+            echo "$s"
+            case "$s" in completed\ success) break;; completed*) exit 1;; esac
+            sleep 60
+          done
+      - uses: actions/download-artifact@v4
+        with:
+          name: Sweet16-apk
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ github.token }}
+          path: out
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv out/Sweet16-iOS16-arm64.apk out/Sweet16-iOS16-arm64-budget-phones.apk
+          gh release create "sweet16-budget-$RUN_ID" out/Sweet16-iOS16-arm64-budget-phones.apk \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Sweet16 for budget phones (2-6 GB RAM)" \
+            --notes "Sweet16 for lower-end phones (itel and similar): Android 8 or newer, **64-bit Android** (Supported ABIs must include arm64-v8a; 32-bit-only Android cannot run it).
+          On phones with less than 6 GB of RAM the app gives iOS 2-3 GB, half the CPU cores (at most 4) and a smaller translation cache. Expect a much slower first boot (several hours) and slow iOS on budget chips.
+          Same app as the main release otherwise; built by run $RUN_ID."

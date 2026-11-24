@@ -104,10 +104,10 @@ class Store(private val context: Context) {
         get() = str("boot_args", "")
         set(v) = prefs.edit().putString("boot_args", v.trim()).apply()
     var tbSizeMb: Int
-        get() = int("tb_size", 512)
+        get() = int("tb_size", if (phoneRamMb() < 6000) 256 else 512)
         set(v) = prefs.edit().putInt("tb_size", v.coerceIn(64, 1024)).apply()
     var ramMb: Int
-        get() = int("ram_mb", 4096)
+        get() = int("ram_mb", defaultRamMb())
         set(v) = prefs.edit().putInt("ram_mb", v.coerceIn(2048, 8192)).apply()
 
     /** Use the picked kernel instead of the built-in one (both profiles). */
@@ -214,7 +214,27 @@ class Store(private val context: Context) {
 
     companion object {
         /** 6 of 8 cores on big phones (two left for Android, QEMU's I/O and the UI), else half. */
-        fun defaultCores(): Int = Runtime.getRuntime().availableProcessors().let { if (it >= 8) 6 else (it / 2).coerceIn(1, 4) }
+        fun defaultCores(): Int = Runtime.getRuntime().availableProcessors().let {
+            when {
+                phoneRamMb() < 6000 -> (it / 2).coerceIn(1, 4)   // budget phones: leave Android room
+                it >= 8 -> 6
+                else -> (it / 2).coerceIn(1, 4)
+            }
+        }
+
+        /** This phone's RAM in MB (from /proc/meminfo; 8192 if unknown). */
+        fun phoneRamMb(): Int = try {
+            java.io.File("/proc/meminfo").readLines().first { it.startsWith("MemTotal:") }
+                .split(Regex("\\s+"))[1].toLong().div(1024).toInt()
+        } catch (e: Exception) {
+            8192
+        }
+
+        /**
+         * Guest RAM: 4 GB on big phones; on 3-6 GB phones (itel and other budget models) 2-3 GB,
+         * so Android keeps enough for itself and QEMU is not killed.
+         */
+        fun defaultRamMb(): Int = phoneRamMb().let { when { it >= 7000 -> 4096; it >= 5000 -> 3072; else -> 2048 } }
 
         /** Daemons that only crash-loop without their hardware in the VM (kernel boot-arg sweetnoexec). */
         const val DEFAULT_SKIP_SERVICES = "bluetoothd,fairplayd.H2"

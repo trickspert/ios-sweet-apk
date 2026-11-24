@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.iossweet.sweet16"
-        minSdk = 29
+        minSdk = 26
         targetSdk = 35
         // Always higher than the previous build: minutes since 2026-01-01.
         versionCode = ((System.currentTimeMillis() / 60000L) - 29_455_200L).toInt()

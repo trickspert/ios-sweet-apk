@@ -10,7 +10,7 @@ on:
     paths: [".github/workflows/lowram-release.yml"]
 
 env:
-  RUN_ID: "0"
+  RUN_ID: "45294103259"
 
 permissions:
   contents: write
